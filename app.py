@@ -94,10 +94,10 @@ def get_data() -> pd.DataFrame:
 df = get_data()
 
 st.markdown(
-    """
+    f"""
     <div class="app-header">
         <h1>🎗️ Cáncer en el Tiempo — Perú</h1>
-        <p>Casos nuevos de cáncer registrados por el INEN (2000–2023)</p>
+        <p>Casos nuevos de cáncer registrados por el INEN ({int(df['Anio'].min())}–{int(df['Anio'].max())})</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -164,10 +164,19 @@ def dept_casos_series(dept: str, site_val: str, year_lo: int, year_hi: int) -> p
             .groupby("Anio")["Casos"]
             .sum(min_count=1)
         )
-        base["Casos"] = base.apply(
-            lambda r: (r["Casos"] - excl.get(r["Anio"], 0)) if pd.notna(r["Casos"]) else r["Casos"],
-            axis=1,
-        )
+
+        def _subtract(row):
+            if pd.isna(row["Casos"]):
+                return row["Casos"]
+            excl_val = excl.get(row["Anio"], 0)
+            # Si el/los departamento(s) excluidos no reportaron dato ese
+            # año (NaN, no cero), se asume que no hay nada que restar en
+            # vez de propagar el NaN y "borrar" el total nacional de ese año.
+            if pd.isna(excl_val):
+                excl_val = 0
+            return row["Casos"] - excl_val
+
+        base["Casos"] = base.apply(_subtract, axis=1)
     return base
 
 # ---------------------------------------------------------------------------
@@ -446,8 +455,8 @@ if year_a not in available_years_kpi:
 if year_b not in available_years_kpi:
     year_b = default_year_b
 
-total_year_b = filtered.loc[filtered["Anio"] == year_b, "Casos"].sum()
-total_year_a = filtered.loc[filtered["Anio"] == year_a, "Casos"].sum()
+total_year_b = filtered.loc[filtered["Anio"] == year_b, "Casos"].sum(min_count=1)
+total_year_a = filtered.loc[filtered["Anio"] == year_a, "Casos"].sum(min_count=1)
 delta_pct = (
     ((total_year_b - total_year_a) / total_year_a * 100) if total_year_a else float("nan")
 )
@@ -489,8 +498,8 @@ with cmp2:
 
 # Recalcular con los valores confirmados por los selectores (mismos que
 # arriba salvo que el usuario los acabe de cambiar en este rerun)
-total_year_b = filtered.loc[filtered["Anio"] == year_b, "Casos"].sum()
-total_year_a = filtered.loc[filtered["Anio"] == year_a, "Casos"].sum()
+total_year_b = filtered.loc[filtered["Anio"] == year_b, "Casos"].sum(min_count=1)
+total_year_a = filtered.loc[filtered["Anio"] == year_a, "Casos"].sum(min_count=1)
 delta_pct = (
     ((total_year_b - total_year_a) / total_year_a * 100) if total_year_a else float("nan")
 )
@@ -904,9 +913,13 @@ with tab_ranking:
             .groupby("Localizacion")["Casos"]
             .sum(min_count=1)
         )
-        rank_data["Casos"] = rank_data.apply(
-            lambda r: r["Casos"] - _excl_rank.get(r["Localizacion"], 0), axis=1
-        )
+        def _subtract_rank(row):
+            excl_val = _excl_rank.get(row["Localizacion"], 0)
+            if pd.isna(excl_val):
+                excl_val = 0
+            return row["Casos"] - excl_val
+
+        rank_data["Casos"] = rank_data.apply(_subtract_rank, axis=1)
         st.caption(
             f"ℹ️ El total de Perú excluye: {', '.join(peru_exclude)} "
             "(configurado en el panel lateral)."
