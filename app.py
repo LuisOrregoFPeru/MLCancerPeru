@@ -97,7 +97,7 @@ st.markdown(
     """
     <div class="app-header">
         <h1>🎗️ Cáncer en el Tiempo — Perú</h1>
-        <p>Casos nuevos de cáncer registrados por el INEN</p>
+        <p>Casos nuevos de cáncer registrados por el INEN (2000–2023)</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -253,12 +253,26 @@ with st.sidebar:
         ),
     )
     mk_target = None
+    mk_year_range = (year_min, year_max)
     if show_mk and depts_selected:
         mk_target = st.selectbox(
             "Departamento a analizar (Mann-Kendall)",
             options=depts_selected,
             index=0,
             key="mk_target_select",
+        )
+        mk_year_range = st.slider(
+            "Rango de años a evaluar (Mann-Kendall)",
+            min_value=year_min,
+            max_value=year_max,
+            value=year_range,
+            step=1,
+            key="mk_year_range",
+            help=(
+                "Acota el test a un sub-periodo específico (por ejemplo, "
+                "antes o después de un cambio de política), independiente "
+                "del rango general del gráfico."
+            ),
         )
 
     show_arbitrary_break = st.checkbox(
@@ -498,6 +512,10 @@ with tab_graph:
             mode = "lines+markers" if show_markers else "lines"
             if show_labels:
                 mode += "+text"
+            # Cuando se muestra la línea suavizada (LOWESS), la serie
+            # original se vuelve translúcida para que el suavizado
+            # resalte visualmente sobre el dato crudo.
+            raw_opacity = 0.35 if show_smooth else 1.0
             if chart_type == "Línea":
                 fig.add_trace(
                     go.Scatter(
@@ -507,6 +525,7 @@ with tab_graph:
                         mode=mode,
                         line=dict(width=2.5, color=color),
                         marker=dict(size=5),
+                        opacity=raw_opacity,
                         text=sub["Casos"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else ""),
                         textposition="top center",
                         textfont=dict(size=10, color=color),
@@ -521,6 +540,7 @@ with tab_graph:
                         y=sub["Casos"],
                         name=dept,
                         marker_color=color,
+                        opacity=raw_opacity,
                         text=sub["Casos"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "")
                         if show_labels
                         else None,
@@ -595,15 +615,22 @@ with tab_graph:
                     annotation_position="top",
                 )
 
-        # Test de tendencia Mann-Kendall + pendiente de Sen (una sola región)
+        # Test de tendencia Mann-Kendall + pendiente de Sen (una sola región,
+        # en el rango de años que el usuario elija, independiente del
+        # rango general del gráfico)
         mk_summary = None
         if show_mk and mk_target:
-            sub_mk = filtered[filtered["Departamento"] == mk_target]
+            sub_mk = df[
+                (df["Localizacion"] == site)
+                & (df["Departamento"] == mk_target)
+                & (df["Anio"].between(mk_year_range[0], mk_year_range[1]))
+            ]
             mkr = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
             if mkr is None:
                 st.info(
                     f"No hay suficientes años con datos en **{mk_target}** "
-                    "para el test de Mann-Kendall (se requieren al menos 6)."
+                    f"entre {mk_year_range[0]} y {mk_year_range[1]} para el "
+                    "test de Mann-Kendall (se requieren al menos 6)."
                 )
             else:
                 mk_summary = mkr
@@ -710,7 +737,7 @@ with tab_graph:
             )
             st.markdown(
                 f"""
-                **🧪 Mann-Kendall para {mk_target}: tendencia {trend_es}**
+                **🧪 Mann-Kendall para {mk_target} ({mk_year_range[0]}–{mk_year_range[1]}): tendencia {trend_es}**
                 — {sig_txt} (z = {mk_summary.z_stat:.2f}, p = {mk_summary.p_value:.4f},
                 τ de Kendall = {mk_summary.tau:.2f}).
                 Pendiente de Sen: {mk_summary.sen_slope:+.1f} casos/año
