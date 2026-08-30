@@ -793,6 +793,7 @@ with tab_ranking:
     )
     years_all_desc = sorted(df["Anio"].unique().tolist(), reverse=True)
     depts_all = departamentos(df)
+    all_sites = localizaciones(df)[1:]  # sin "Todas las localizaciones"
 
     rc1, rc2, rc3 = st.columns([1, 1.4, 1.2])
     with rc1:
@@ -807,11 +808,25 @@ with tab_ranking:
     with rc3:
         rank_top_n = st.slider("Top N localizaciones", 5, 38, 15, key="rank_top_n")
 
+    rank_exclude = st.multiselect(
+        "Excluir localización(es) del ranking",
+        options=all_sites,
+        default=[],
+        key="rank_exclude",
+        help=(
+            "Útil para quitar categorías genéricas como 'Otros' o "
+            "'Primario Desconocido', que suelen concentrar muchos casos "
+            "sin ser clínicamente específicas, y así ver mejor el "
+            "ranking de los tipos de cáncer concretos."
+        ),
+    )
+
     rank_data = (
         df[
             (df["Anio"] == rank_year)
             & (df["Departamento"] == rank_dept)
             & (df["Localizacion"] != ALL_SITES_LABEL)
+            & (~df["Localizacion"].isin(rank_exclude))
         ]
         .dropna(subset=["Casos"])
         .sort_values("Casos", ascending=False)
@@ -819,7 +834,10 @@ with tab_ranking:
     )
 
     if rank_data.empty:
-        st.warning(f"No hay datos registrados para **{rank_dept}** en **{rank_year}**.")
+        st.warning(
+            f"No hay datos registrados para **{rank_dept}** en **{rank_year}**"
+            + (" con las localizaciones excluidas actuales." if rank_exclude else ".")
+        )
     else:
         n_bars = len(rank_data)
         bar_colors = shades_of(PRIMARY_COLOR, n_bars)
