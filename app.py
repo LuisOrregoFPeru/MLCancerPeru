@@ -137,6 +137,39 @@ def shades_of(hex_color: str, n: int, l_min: float = 0.30, l_max: float = 0.80) 
         )
     return colors
 
+
+def dept_casos_series(dept: str, site_val: str, year_lo: int, year_hi: int) -> pd.DataFrame:
+    """Devuelve las filas Anio/Casos para un departamento y una
+    localización del tumor primario, en el rango de años dado.
+
+    Si `dept` es "Perú (Total nacional)" y el usuario configuró
+    exclusiones en el panel lateral (variable global `peru_exclude`,
+    p. ej. para no contar 'Extranjero'), esos casos se restan del total
+    nacional tal como lo reporta el INEN. Si el departamento excluido no
+    tiene dato para un año dado, no se resta nada ese año (se asume 0,
+    no una ausencia de dato)."""
+    base = df[
+        df["Localizacion"].eq(site_val)
+        & df["Departamento"].eq(dept)
+        & df["Anio"].between(year_lo, year_hi)
+    ][["Anio", "Casos"]].copy()
+
+    if dept == PERU_LABEL and peru_exclude:
+        excl = (
+            df[
+                df["Localizacion"].eq(site_val)
+                & df["Departamento"].isin(peru_exclude)
+                & df["Anio"].between(year_lo, year_hi)
+            ]
+            .groupby("Anio")["Casos"]
+            .sum(min_count=1)
+        )
+        base["Casos"] = base.apply(
+            lambda r: (r["Casos"] - excl.get(r["Anio"], 0)) if pd.notna(r["Casos"]) else r["Casos"],
+            axis=1,
+        )
+    return base
+
 # ---------------------------------------------------------------------------
 # Barra lateral — controles (equivalente al panel "Display" de GLOBOCAN)
 # ---------------------------------------------------------------------------
@@ -186,6 +219,23 @@ with st.sidebar:
     )
     if not depts_selected:
         depts_selected = default_depts
+
+    peru_exclude: list[str] = []
+    if PERU_LABEL in depts_selected:
+        peru_exclude = st.multiselect(
+            "Excluir del total nacional (Perú)",
+            options=[d for d in depts_available if d != PERU_LABEL],
+            default=[],
+            key="peru_exclude",
+            help=(
+                "Ej.: si no quieres que los casos de 'Extranjero' cuenten "
+                "dentro del total de Perú, selecciónalo aquí. Se resta del "
+                "total nacional (reportado por el INEN) para la localización "
+                "y los años seleccionados, y afecta también al ranking, "
+                "Mann-Kendall, quiebres y proyección cuando el departamento "
+                "analizado es Perú."
+            ),
+        )
 
     st.subheader("Periodo")
     year_min, year_max = int(df["Anio"].min()), int(df["Anio"].max())
@@ -359,12 +409,22 @@ with st.sidebar:
 # Filtrado
 # ---------------------------------------------------------------------------
 
-mask = (
-    df["Localizacion"].eq(site)
-    & df["Departamento"].isin(depts_selected)
-    & df["Anio"].between(year_range[0], year_range[1])
-)
-filtered = df.loc[mask].sort_values(["Departamento", "Anio"])
+# Se construye departamento por departamento (en vez de un filtro simple)
+# para poder aplicar el ajuste de exclusión del total nacional (Perú menos
+# los departamentos marcados en `peru_exclude`, p. ej. "Extranjero").
+_filtered_frames = []
+for _dept in depts_selected:
+    _sub = dept_casos_series(_dept, site, year_range[0], year_range[1]).copy()
+    _sub["Departamento"] = _dept
+    _sub["Localizacion"] = site
+    _filtered_frames.append(_sub)
+
+if _filtered_frames:
+    filtered = pd.concat(_filtered_frames, ignore_index=True)[
+        ["Departamento", "Localizacion", "Anio", "Casos"]
+    ].sort_values(["Departamento", "Anio"])
+else:
+    filtered = df.iloc[0:0][["Departamento", "Localizacion", "Anio", "Casos"]]
 
 # ---------------------------------------------------------------------------
 # Resumen general + KPIs
@@ -620,11 +680,7 @@ with tab_graph:
         # rango general del gráfico)
         mk_summary = None
         if show_mk and mk_target:
-            sub_mk = df[
-                (df["Localizacion"] == site)
-                & (df["Departamento"] == mk_target)
-                & (df["Anio"].between(mk_year_range[0], mk_year_range[1]))
-            ]
+            sub_mk = dept_casos_series(mk_target, site, mk_year_range[0], mk_year_range[1])
             mkr = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
             if mkr is None:
                 st.info(
@@ -707,6 +763,12 @@ with tab_graph:
         all_years = sorted(filtered["Anio"].unique())
         fig.update_xaxes(tickmode="array", tickvals=all_years, tickangle=45)
         st.plotly_chart(fig, use_container_width=True)
+
+        if PERU_LABEL in depts_selected and peru_exclude:
+            st.caption(
+                f"ℹ️ El total de **{PERU_LABEL}** mostrado excluye: "
+                f"{', '.join(peru_exclude)} (configurado en el panel lateral)."
+            )
 
         if bp_summary is not None:
             sig_txt = (
@@ -829,9 +891,28 @@ with tab_ranking:
             & (~df["Localizacion"].isin(rank_exclude))
         ]
         .dropna(subset=["Casos"])
-        .sort_values("Casos", ascending=False)
-        .head(rank_top_n)
+        .copy()
     )
+
+    if rank_dept == PERU_LABEL and peru_exclude:
+        _excl_rank = (
+            df[
+                (df["Anio"] == rank_year)
+                & (df["Departamento"].isin(peru_exclude))
+                & (df["Localizacion"] != ALL_SITES_LABEL)
+            ]
+            .groupby("Localizacion")["Casos"]
+            .sum(min_count=1)
+        )
+        rank_data["Casos"] = rank_data.apply(
+            lambda r: r["Casos"] - _excl_rank.get(r["Localizacion"], 0), axis=1
+        )
+        st.caption(
+            f"ℹ️ El total de Perú excluye: {', '.join(peru_exclude)} "
+            "(configurado en el panel lateral)."
+        )
+
+    rank_data = rank_data.sort_values("Casos", ascending=False).head(rank_top_n)
 
     if rank_data.empty:
         st.warning(
