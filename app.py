@@ -97,7 +97,7 @@ st.markdown(
     """
     <div class="app-header">
         <h1>🎗️ Cáncer en el Tiempo — Perú</h1>
-        <p>Casos nuevos de cáncer registrados por el INEN (2000–2023)</p>
+        <p>Casos nuevos de cáncer registrados por el INEN</p>
     </div>
     """,
     unsafe_allow_html=True,
