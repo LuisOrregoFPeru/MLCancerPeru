@@ -4,7 +4,7 @@ Dashboard interactivo en **Streamlit**, inspirado en el visor
 [*Cancer Over Time*](https://gco.iarc.who.int) de GLOBOCAN/IARC, construido
 sobre los datos de casos registrados por el **INEN** (Instituto Nacional de
 Enfermedades Neoplásicas) para los 25 departamentos del Perú + el total nacional,
-2000–2023.
+2000–2024.
 
 ## ✨ Funcionalidades
 
