@@ -1118,7 +1118,7 @@ st.markdown(
     <p style="text-align:center; color:#666; font-size:0.85rem;">
     © Luis A. Orrego Ferreyros, DDS, Econ., MCE, MMD, PhD(c), CQRM ·
     Epidemiólogo y Economista de la Salud ·
-    Dirección de Servicios de Apoyo al Diagnóstico y Tratamiento — INEN
+    INEN
     </p>
     """,
     unsafe_allow_html=True,
