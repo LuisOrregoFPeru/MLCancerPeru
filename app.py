@@ -1071,7 +1071,7 @@ with tab_ranking:
         )
         fig_rank.update_layout(
             title=f"Ranking de cánceres — {rank_dept}, {rank_year}",
-            xaxis_title="N° de casos",
+            xaxis_title="N° de casos nuevos",
             yaxis_title="",
             yaxis=dict(autorange="reversed", tickfont=dict(size=13)),
             height=max(420, 26 * len(rank_data)),
@@ -1264,7 +1264,7 @@ with tab_ranking_anim:
                             title=f"Ranking de cánceres — {anim_dept}",
                             annotations=[year_annotation],
                             xaxis=dict(
-                                title="N° de casos", range=[0, global_max * 1.2]
+                                title="N° de casos nuevos", range=[0, global_max * 1.2]
                             ),
                             yaxis=dict(
                                 showticklabels=False,
@@ -1384,7 +1384,7 @@ with tab_ranking_anim:
                                     fontsize=46, fontweight="black",
                                     color="black", ha="right", va="bottom",
                                 )
-                                ax.set_xlabel("N° de casos")
+                                ax.set_xlabel("N° de casos nuevos")
                                 ax.invert_yaxis()
                                 ax.spines[["top", "right"]].set_visible(False)
                                 mpl_fig.tight_layout()
