@@ -19,6 +19,7 @@ Estructura del proyecto:
 from __future__ import annotations
 
 import colorsys
+import io
 
 import numpy as np
 import pandas as pd
@@ -41,6 +42,20 @@ from stats_analysis import (
     project_series,
     smooth_series,
 )
+
+# Generación de GIF para el ranking animado: dependencias opcionales — si no
+# están disponibles, la animación interactiva de Plotly sigue funcionando y
+# solo se oculta el botón de descarga de GIF.
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import imageio.v2 as imageio
+
+    _GIF_EXPORT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _GIF_EXPORT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuración general de la página
@@ -179,6 +194,110 @@ def dept_casos_series(dept: str, site_val: str, year_lo: int, year_hi: int) -> p
         base["Casos"] = base.apply(_subtract, axis=1)
     return base
 
+
+_RANK_MEDALS = ["🥇", "🥈", "🥉"]
+
+
+def get_year_ranking(
+    dept: str,
+    year: int,
+    exclude: list[str] | None = None,
+    top_n: int | None = None,
+    peru_excl_override: list[str] | None = None,
+) -> pd.DataFrame:
+    """Devuelve el ranking (descendente por N° de casos) de
+    localizaciones del tumor primario para un departamento y año dados.
+
+    Aplica el ajuste de exclusión del total nacional (cuando `dept` es
+    Perú) usando `peru_excl_override` si se especifica, o si no la
+    variable global `peru_exclude` configurada en el panel lateral.
+    Opcionalmente excluye localizaciones específicas o recorta a las
+    primeras `top_n`. Se usa tanto en la pestaña "Ranking por año" como
+    en "Ranking animado", para no duplicar la lógica."""
+    exclude = exclude or []
+    effective_peru_exclude = (
+        peru_excl_override if peru_excl_override is not None else peru_exclude
+    )
+    data = (
+        df[
+            (df["Anio"] == year)
+            & (df["Departamento"] == dept)
+            & (df["Localizacion"] != ALL_SITES_LABEL)
+            & (~df["Localizacion"].isin(exclude))
+        ][["Localizacion", "Casos"]]
+        .dropna(subset=["Casos"])
+        .copy()
+    )
+
+    if dept == PERU_LABEL and effective_peru_exclude:
+        excl = (
+            df[
+                (df["Anio"] == year)
+                & (df["Departamento"].isin(effective_peru_exclude))
+                & (df["Localizacion"] != ALL_SITES_LABEL)
+            ]
+            .groupby("Localizacion")["Casos"]
+            .sum(min_count=1)
+        )
+
+        def _sub(row):
+            e = excl.get(row["Localizacion"], 0)
+            if pd.isna(e):
+                e = 0
+            return row["Casos"] - e
+
+        data["Casos"] = data.apply(_sub, axis=1)
+
+    data = data.sort_values("Casos", ascending=False).reset_index(drop=True)
+    if top_n is not None:
+        data = data.head(top_n)
+    return data
+
+
+def top3_localizaciones(dept: str, year: int) -> str:
+    """Texto (HTML, para hover de Plotly) con el top 3 de localizaciones
+    del tumor primario con más casos para un departamento y año dados.
+
+    Si `dept` es Perú y hay exclusiones configuradas (variable global
+    `peru_exclude`), se aplican de la misma forma que en el resto del
+    dashboard antes de calcular el ranking."""
+    sub = (
+        df[
+            (df["Anio"] == year)
+            & (df["Departamento"] == dept)
+            & (df["Localizacion"] != ALL_SITES_LABEL)
+        ][["Localizacion", "Casos"]]
+        .dropna(subset=["Casos"])
+        .copy()
+    )
+
+    if dept == PERU_LABEL and peru_exclude:
+        excl = (
+            df[
+                (df["Anio"] == year)
+                & (df["Departamento"].isin(peru_exclude))
+                & (df["Localizacion"] != ALL_SITES_LABEL)
+            ]
+            .groupby("Localizacion")["Casos"]
+            .sum(min_count=1)
+        )
+
+        def _sub(row):
+            e = excl.get(row["Localizacion"], 0)
+            if pd.isna(e):
+                e = 0
+            return row["Casos"] - e
+
+        sub["Casos"] = sub.apply(_sub, axis=1)
+
+    sub = sub.sort_values("Casos", ascending=False).head(3)
+    if sub.empty:
+        return "Sin datos por localización"
+    return "<br>".join(
+        f"{_RANK_MEDALS[i]} {row.Localizacion}: {row.Casos:,.0f}"
+        for i, row in enumerate(sub.itertuples())
+    )
+
 # ---------------------------------------------------------------------------
 # Barra lateral — controles (equivalente al panel "Display" de GLOBOCAN)
 # ---------------------------------------------------------------------------
@@ -262,6 +381,15 @@ with st.sidebar:
     )
     show_markers = st.checkbox("Mostrar marcadores", value=True)
     show_labels = st.checkbox("Mostrar etiquetas en cada punto", value=False)
+    show_rank_labels = st.checkbox(
+        "Mostrar etiquetas con ranking",
+        value=False,
+        help=(
+            "Al pasar el cursor sobre un punto, muestra además el top 3 "
+            "de localizaciones del tumor primario con más casos ese año "
+            "para el departamento correspondiente (🥇🥈🥉)."
+        ),
+    )
     log_scale = st.checkbox("Escala logarítmica (eje Y)", value=False)
     show_smooth = st.checkbox(
         "Mostrar línea temporal suavizada (LOWESS)",
@@ -562,8 +690,8 @@ else:
 # Gráfico principal (equivalente al "Graphic" tab de GLOBOCAN)
 # ---------------------------------------------------------------------------
 
-tab_graph, tab_table, tab_ranking, tab_projection, tab_downloads = st.tabs(
-    ["📈 Gráfico", "📋 Tabla", "🏆 Ranking por año", "🔮 Proyección", "⬇️ Descargas"]
+tab_graph, tab_table, tab_ranking, tab_ranking_anim, tab_projection, tab_downloads = st.tabs(
+    ["📈 Gráfico", "📋 Tabla", "🏆 Ranking por año", "🎬 Ranking animado", "🔮 Proyección", "⬇️ Descargas"]
 )
 
 with tab_graph:
@@ -585,6 +713,19 @@ with tab_graph:
             # original se vuelve translúcida para que el suavizado
             # resalte visualmente sobre el dato crudo.
             raw_opacity = 0.35 if show_smooth else 1.0
+
+            # Top 3 de localizaciones por año, para enriquecer el hover
+            # cuando "Mostrar etiquetas con ranking" está activo.
+            if show_rank_labels:
+                rank_customdata = [top3_localizaciones(dept, y) for y in sub["Anio"]]
+                hover_tpl = (
+                    "%{x}: %{y:,.0f} casos<br><br><b>Top 3 en " + dept + "</b><br>"
+                    "%{customdata}<extra></extra>"
+                )
+            else:
+                rank_customdata = None
+                hover_tpl = "%{x}: %{y:,.0f} casos<extra>" + dept + "</extra>"
+
             if chart_type == "Línea":
                 fig.add_trace(
                     go.Scatter(
@@ -599,7 +740,8 @@ with tab_graph:
                         textposition="top center",
                         textfont=dict(size=10, color=color),
                         connectgaps=True,
-                        hovertemplate="%{x}: %{y:,.0f} casos<extra>" + dept + "</extra>",
+                        customdata=rank_customdata,
+                        hovertemplate=hover_tpl,
                     )
                 )
             else:
@@ -614,7 +756,8 @@ with tab_graph:
                         if show_labels
                         else None,
                         textposition="outside",
-                        hovertemplate="%{x}: %{y:,.0f} casos<extra>" + dept + "</extra>",
+                        customdata=rank_customdata,
+                        hovertemplate=hover_tpl,
                     )
                 )
 
@@ -760,7 +903,7 @@ with tab_graph:
         fig.update_layout(
             title=f"Casos de cáncer — {site}",
             xaxis_title="Año",
-            yaxis_title="N° de casos registrados",
+            yaxis_title="N° de casos nuevos",
             yaxis_type="log" if log_scale else "linear",
             barmode="group",
             height=580,
@@ -892,40 +1035,13 @@ with tab_ranking:
         ),
     )
 
-    rank_data = (
-        df[
-            (df["Anio"] == rank_year)
-            & (df["Departamento"] == rank_dept)
-            & (df["Localizacion"] != ALL_SITES_LABEL)
-            & (~df["Localizacion"].isin(rank_exclude))
-        ]
-        .dropna(subset=["Casos"])
-        .copy()
-    )
+    rank_data = get_year_ranking(rank_dept, rank_year, exclude=rank_exclude, top_n=rank_top_n)
 
     if rank_dept == PERU_LABEL and peru_exclude:
-        _excl_rank = (
-            df[
-                (df["Anio"] == rank_year)
-                & (df["Departamento"].isin(peru_exclude))
-                & (df["Localizacion"] != ALL_SITES_LABEL)
-            ]
-            .groupby("Localizacion")["Casos"]
-            .sum(min_count=1)
-        )
-        def _subtract_rank(row):
-            excl_val = _excl_rank.get(row["Localizacion"], 0)
-            if pd.isna(excl_val):
-                excl_val = 0
-            return row["Casos"] - excl_val
-
-        rank_data["Casos"] = rank_data.apply(_subtract_rank, axis=1)
         st.caption(
             f"ℹ️ El total de Perú excluye: {', '.join(peru_exclude)} "
             "(configurado en el panel lateral)."
         )
-
-    rank_data = rank_data.sort_values("Casos", ascending=False).head(rank_top_n)
 
     if rank_data.empty:
         st.warning(
@@ -934,7 +1050,10 @@ with tab_ranking:
         )
     else:
         n_bars = len(rank_data)
-        bar_colors = shades_of(PRIMARY_COLOR, n_bars)
+        rank_base_color = (
+            color_overrides.get(rank_dept, PRIMARY_COLOR) if custom_colors else PRIMARY_COLOR
+        )
+        bar_colors = shades_of(rank_base_color, n_bars)
         ranks = list(range(1, n_bars + 1))
         bar_text = [f"{r}° · {c:,.0f}" for r, c in zip(ranks, rank_data["Casos"])]
 
@@ -946,6 +1065,7 @@ with tab_ranking:
                 marker_color=bar_colors,
                 text=bar_text,
                 textposition="outside",
+                textfont=dict(size=15),
                 hovertemplate="%{y}: %{x:,.0f} casos<extra></extra>",
             )
         )
@@ -953,7 +1073,7 @@ with tab_ranking:
             title=f"Ranking de cánceres — {rank_dept}, {rank_year}",
             xaxis_title="N° de casos",
             yaxis_title="",
-            yaxis=dict(autorange="reversed"),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=13)),
             height=max(420, 26 * len(rank_data)),
             template="plotly_white",
             margin=dict(l=10, r=80, t=60, b=40),
@@ -978,6 +1098,322 @@ with tab_ranking:
             file_name=f"ranking_{rank_dept.replace(' ', '_')}_{rank_year}.csv",
             mime="text/csv",
         )
+
+with tab_ranking_anim:
+    st.markdown("#### Ranking animado — evolución de los cánceres en el tiempo")
+    st.caption(
+        "Muestra cómo cambia el ranking de localizaciones del tumor primario "
+        "año a año ('bar chart race'). Reproduce la animación directamente "
+        "aquí, o descárgala como GIF."
+    )
+
+    years_all_asc = sorted(df["Anio"].unique().tolist())
+
+    ac1, ac2 = st.columns([1.6, 1])
+    with ac1:
+        anim_dept = st.selectbox(
+            "Departamento",
+            options=depts_all,
+            index=depts_all.index(PERU_LABEL),
+            key="anim_dept",
+        )
+    with ac2:
+        anim_top_n = st.slider("Top N localizaciones", 5, 15, 8, key="anim_top_n")
+
+    anim_year_range = st.select_slider(
+        "Rango de años a animar",
+        options=years_all_asc,
+        value=(years_all_asc[0], years_all_asc[-1]),
+        key="anim_year_range",
+    )
+
+    anim_exclude = st.multiselect(
+        "Excluir localización(es) de la animación",
+        options=all_sites,
+        default=[],
+        key="anim_exclude",
+    )
+
+    anim_dept_exclude: list[str] = []
+    if anim_dept == PERU_LABEL:
+        anim_dept_exclude = st.multiselect(
+            "Excluir departamento(s) del total nacional (ej. Extranjero)",
+            options=[d for d in depts_all if d != PERU_LABEL],
+            default=peru_exclude,
+            key="anim_dept_exclude",
+            help=(
+                "Igual que en el panel lateral, pero específico para esta "
+                "animación. Por defecto trae lo configurado en el panel "
+                "lateral; puedes cambiarlo aquí sin afectar el gráfico principal."
+            ),
+        )
+
+    anim_seconds = st.slider(
+        "Velocidad: segundos por año",
+        min_value=0.2,
+        max_value=2.0,
+        value=0.7,
+        step=0.1,
+        key="anim_seconds",
+        help="Valores bajos = animación más rápida. Aplica tanto a la vista interactiva como al GIF descargable.",
+    )
+
+    if anim_dept == PERU_LABEL and anim_dept_exclude:
+        st.caption(f"ℹ️ El total de Perú excluye: {', '.join(anim_dept_exclude)}.")
+
+    generate_anim = st.button("🎬 Generar ranking animado", key="anim_generate")
+
+    if generate_anim:
+        anim_years = list(range(anim_year_range[0], anim_year_range[1] + 1))
+        if len(anim_years) < 2:
+            st.warning("Selecciona un rango de al menos 2 años para animar.")
+        else:
+            with st.spinner("Generando animación..."):
+                year_rankings = {}
+                universe: set[str] = set()
+                for y in anim_years:
+                    r = get_year_ranking(
+                        anim_dept, y, exclude=anim_exclude, peru_excl_override=anim_dept_exclude
+                    )
+                    year_rankings[y] = r.set_index("Localizacion")["Casos"]
+                    universe.update(r.head(anim_top_n)["Localizacion"].tolist())
+                universe = sorted(universe)
+
+                if not universe:
+                    st.warning(
+                        f"No hay datos para **{anim_dept}** en el rango "
+                        f"{anim_year_range[0]}–{anim_year_range[1]} con los "
+                        "filtros actuales."
+                    )
+                else:
+                    global_max = 0.0
+                    for y in anim_years:
+                        v = (
+                            year_rankings[y]
+                            .reindex(universe)
+                            .fillna(0)
+                            .sort_values(ascending=False)
+                            .head(anim_top_n)
+                        )
+                        if len(v):
+                            global_max = max(global_max, float(v.max()))
+                    if global_max <= 0:
+                        global_max = 1.0
+
+                    # Duración de cada cuadro vs. duración de la transición:
+                    # una transición que ocupa la mayor parte del intervalo
+                    # (con easing) es lo que hace que el movimiento se vea
+                    # fluido en vez de "saltar" de un año a otro.
+                    frame_duration_ms = int(anim_seconds * 1000)
+                    transition_ms = max(50, int(frame_duration_ms * 0.85))
+
+                    year_annotation = dict(
+                        text=str(anim_years[0]),
+                        xref="x domain",
+                        yref="y domain",
+                        x=0.99,
+                        y=0.03,
+                        xanchor="right",
+                        yanchor="bottom",
+                        showarrow=False,
+                        font=dict(size=58, color="black", family="Arial Black, Arial"),
+                    )
+
+                    anim_base_color = (
+                        color_overrides.get(anim_dept, PRIMARY_COLOR)
+                        if custom_colors
+                        else PRIMARY_COLOR
+                    )
+
+                    frames = []
+                    for y in anim_years:
+                        vals = year_rankings[y].reindex(universe).fillna(0)
+                        ordered = vals.sort_values(ascending=False).head(anim_top_n)
+                        names = ordered.index.tolist()
+                        values = ordered.values.tolist()
+                        n = len(names)
+                        y_pos = list(range(n, 0, -1))
+                        colors = shades_of(anim_base_color, n)
+                        text = [
+                            f"{r}° {name}: {val:,.0f}"
+                            for r, (name, val) in enumerate(zip(names, values), start=1)
+                        ]
+                        frame_annotation = dict(year_annotation, text=str(y))
+                        frames.append(
+                            go.Frame(
+                                name=str(y),
+                                data=[
+                                    go.Bar(
+                                        x=values,
+                                        y=y_pos,
+                                        orientation="h",
+                                        marker_color=colors,
+                                        text=text,
+                                        textposition="outside",
+                                        textfont=dict(size=14),
+                                        hovertemplate="%{text}<extra></extra>",
+                                    )
+                                ],
+                                layout=go.Layout(annotations=[frame_annotation]),
+                            )
+                        )
+
+                    fig_anim = go.Figure(
+                        data=frames[0].data,
+                        layout=go.Layout(
+                            title=f"Ranking de cánceres — {anim_dept}",
+                            annotations=[year_annotation],
+                            xaxis=dict(
+                                title="N° de casos", range=[0, global_max * 1.2]
+                            ),
+                            yaxis=dict(
+                                showticklabels=False,
+                                range=[0.3, anim_top_n + 0.9],
+                            ),
+                            template="plotly_white",
+                            height=max(420, 34 * anim_top_n) + 140,
+                            margin=dict(l=20, r=160, t=70, b=170),
+                            updatemenus=[
+                                dict(
+                                    type="buttons",
+                                    direction="right",
+                                    showactive=False,
+                                    x=0.5,
+                                    xanchor="center",
+                                    y=-0.16,
+                                    yanchor="top",
+                                    pad=dict(t=10, r=10),
+                                    buttons=[
+                                        dict(
+                                            label="▶ Reproducir",
+                                            method="animate",
+                                            args=[
+                                                None,
+                                                {
+                                                    "frame": {
+                                                        "duration": frame_duration_ms,
+                                                        "redraw": True,
+                                                    },
+                                                    "fromcurrent": True,
+                                                    "transition": {
+                                                        "duration": transition_ms,
+                                                        "easing": "cubic-in-out",
+                                                    },
+                                                },
+                                            ],
+                                        ),
+                                        dict(
+                                            label="⏸ Pausar",
+                                            method="animate",
+                                            args=[
+                                                [None],
+                                                {
+                                                    "frame": {"duration": 0, "redraw": False},
+                                                    "mode": "immediate",
+                                                },
+                                            ],
+                                        ),
+                                    ],
+                                )
+                            ],
+                            sliders=[
+                                dict(
+                                    active=0,
+                                    x=0.0,
+                                    y=-0.28,
+                                    len=1.0,
+                                    currentvalue=dict(prefix="Año: ", font=dict(size=13)),
+                                    steps=[
+                                        dict(
+                                            method="animate",
+                                            label=str(y),
+                                            args=[
+                                                [str(y)],
+                                                {
+                                                    "frame": {
+                                                        "duration": frame_duration_ms,
+                                                        "redraw": True,
+                                                    },
+                                                    "mode": "immediate",
+                                                    "transition": {
+                                                        "duration": transition_ms,
+                                                        "easing": "cubic-in-out",
+                                                    },
+                                                },
+                                            ],
+                                        )
+                                        for y in anim_years
+                                    ],
+                                )
+                            ],
+                        ),
+                        frames=frames,
+                    )
+                    st.plotly_chart(fig_anim, use_container_width=True)
+
+                    if _GIF_EXPORT_AVAILABLE:
+                        with st.spinner("Generando GIF descargable..."):
+                            images = []
+                            for y in anim_years:
+                                vals = year_rankings[y].reindex(universe).fillna(0)
+                                ordered = vals.sort_values(ascending=False).head(anim_top_n)
+                                names = ordered.index.tolist()
+                                values = ordered.values.tolist()
+                                n = len(names)
+                                colors = shades_of(anim_base_color, n)
+
+                                mpl_fig, ax = plt.subplots(
+                                    figsize=(9, 0.5 * anim_top_n + 1.4), dpi=110
+                                )
+                                ax.barh(range(n), values, color=colors)
+                                ax.set_yticks(range(n))
+                                ax.set_yticklabels(
+                                    [f"{r}° {name}" for r, name in enumerate(names, start=1)],
+                                    fontsize=12,
+                                )
+                                ax.set_xlim(0, global_max * 1.2)
+                                for i, val in enumerate(values):
+                                    ax.text(
+                                        val + global_max * 0.01, i, f"{val:,.0f}",
+                                        va="center", fontsize=11,
+                                    )
+                                ax.set_title(anim_dept, fontsize=13, loc="left", color="#555")
+                                ax.text(
+                                    0.98, 0.04, str(y),
+                                    transform=ax.transAxes,
+                                    fontsize=46, fontweight="black",
+                                    color="black", ha="right", va="bottom",
+                                )
+                                ax.set_xlabel("N° de casos")
+                                ax.invert_yaxis()
+                                ax.spines[["top", "right"]].set_visible(False)
+                                mpl_fig.tight_layout()
+
+                                buf = io.BytesIO()
+                                mpl_fig.savefig(buf, format="png")
+                                plt.close(mpl_fig)
+                                buf.seek(0)
+                                images.append(imageio.imread(buf))
+
+                            gif_buf = io.BytesIO()
+                            imageio.mimsave(
+                                gif_buf, images, format="GIF", duration=anim_seconds
+                            )
+                            gif_buf.seek(0)
+                            gif_bytes = gif_buf.getvalue()
+
+                        st.download_button(
+                            "Descargar animación (GIF)",
+                            data=gif_bytes,
+                            file_name=f"ranking_animado_{anim_dept.replace(' ', '_')}_{anim_years[0]}_{anim_years[-1]}.gif",
+                            mime="image/gif",
+                        )
+                    else:
+                        st.info(
+                            "La descarga en GIF no está disponible en este entorno "
+                            "(faltan las librerías matplotlib/imageio), pero la "
+                            "animación interactiva de arriba funciona igual."
+                        )
 
 with tab_projection:
     if not show_projection or not proj_target:
@@ -1117,8 +1553,7 @@ st.markdown(
     """
     <p style="text-align:center; color:#666; font-size:0.85rem;">
     © Luis A. Orrego Ferreyros, DDS, Econ., MCE, MMD, PhD(c), CQRM ·
-    Epidemiólogo y Economista de la Salud ·
-    INEN
+    Epidemiólogo y Economista de la Salud · INEN
     </p>
     """,
     unsafe_allow_html=True,
