@@ -57,6 +57,39 @@ try:
 except ImportError:  # pragma: no cover
     _GIF_EXPORT_AVAILABLE = False
 
+# Generación del Reporte Ejecutivo (PDF / PPTX): dependencias opcionales,
+# puras en Python (sin binarios de sistema como Chrome/LibreOffice) para
+# no repetir problemas de despliegue en Streamlit Cloud.
+from datetime import datetime
+
+try:
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        Image as RLImage,
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    _PDF_EXPORT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _PDF_EXPORT_AVAILABLE = False
+
+try:
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
+    _PPTX_EXPORT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _PPTX_EXPORT_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Configuración general de la página
 # ---------------------------------------------------------------------------
@@ -335,6 +368,25 @@ with st.sidebar:
         options=localizaciones(df),
         index=0,
     )
+
+    show_extra_sites = st.checkbox(
+        "Comparar varias localizaciones (gráficos adicionales)",
+        value=False,
+        help=(
+            "Agrega un gráfico adicional por cada localización del tumor "
+            "primario que selecciones, para evaluarlas simultáneamente sin "
+            "perder la selección principal de arriba."
+        ),
+    )
+    extra_sites: list[str] = []
+    if show_extra_sites:
+        extra_sites = st.multiselect(
+            "Localizaciones adicionales a mostrar",
+            options=localizaciones(df),
+            default=[],
+            max_selections=6,
+            key="extra_sites",
+        )
 
     st.subheader("Departamento de residencia a comparar")
     depts_available = departamentos(df)
@@ -690,299 +742,316 @@ else:
 # Gráfico principal (equivalente al "Graphic" tab de GLOBOCAN)
 # ---------------------------------------------------------------------------
 
-tab_graph, tab_table, tab_ranking, tab_ranking_anim, tab_projection, tab_downloads = st.tabs(
-    ["📈 Gráfico", "📋 Tabla", "🏆 Ranking por año", "🎬 Ranking animado", "🔮 Proyección", "⬇️ Descargas"]
+(
+    tab_graph, tab_table, tab_ranking, tab_ranking_anim, tab_projection,
+    tab_downloads, tab_report,
+) = st.tabs(
+    [
+        "📈 Gráfico", "📋 Tabla", "🏆 Ranking por año", "🎬 Ranking animado",
+        "🔮 Proyección", "⬇️ Descargas", "📑 Reporte ejecutivo",
+    ]
 )
 
-with tab_graph:
-    if filtered.empty:
-        st.warning("No hay datos para la combinación seleccionada.")
-    else:
-        fig = go.Figure()
-        for i, dept in enumerate(depts_selected):
-            sub = filtered[filtered["Departamento"] == dept]
-            color = (
-                color_overrides.get(dept, DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)])
-                if custom_colors
-                else DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)]
-            )
-            mode = "lines+markers" if show_markers else "lines"
-            if show_labels:
-                mode += "+text"
-            # Cuando se muestra la línea suavizada (LOWESS), la serie
-            # original se vuelve translúcida para que el suavizado
-            # resalte visualmente sobre el dato crudo.
-            raw_opacity = 0.35 if show_smooth else 1.0
 
-            # Top 3 de localizaciones por año, para enriquecer el hover
-            # cuando "Mostrar etiquetas con ranking" está activo.
-            if show_rank_labels:
-                rank_customdata = [top3_localizaciones(dept, y) for y in sub["Anio"]]
-                hover_tpl = (
-                    "%{x}: %{y:,.0f} casos<br><br><b>Top 3 en " + dept + "</b><br>"
-                    "%{customdata}<extra></extra>"
-                )
-            else:
-                rank_customdata = None
-                hover_tpl = "%{x}: %{y:,.0f} casos<extra>" + dept + "</extra>"
+def render_site_analysis_chart(
+    site_val: str,
+    filtered_local: pd.DataFrame,
+    compact: bool = False,
+    key_suffix: str = "",
+) -> None:
+    """Construye y renderiza el gráfico de una localización del tumor
+    primario, con línea de tendencia, suavizado LOWESS, quiebre
+    automático, Mann-Kendall y quiebre por evento —  todo según los
+    controles del panel lateral. La usan tanto el gráfico principal
+    como los gráficos adicionales de otras localizaciones, así todos
+    comparten exactamente el mismo análisis estadístico y la misma
+    personalización de colores.
 
-            if chart_type == "Línea":
-                fig.add_trace(
-                    go.Scatter(
-                        x=sub["Anio"],
-                        y=sub["Casos"],
-                        name=dept,
-                        mode=mode,
-                        line=dict(width=2.5, color=color),
-                        marker=dict(size=5),
-                        opacity=raw_opacity,
-                        text=sub["Casos"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else ""),
-                        textposition="top center",
-                        textfont=dict(size=10, color=color),
-                        connectgaps=True,
-                        customdata=rank_customdata,
-                        hovertemplate=hover_tpl,
-                    )
-                )
-            else:
-                fig.add_trace(
-                    go.Bar(
-                        x=sub["Anio"],
-                        y=sub["Casos"],
-                        name=dept,
-                        marker_color=color,
-                        opacity=raw_opacity,
-                        text=sub["Casos"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "")
-                        if show_labels
-                        else None,
-                        textposition="outside",
-                        customdata=rank_customdata,
-                        hovertemplate=hover_tpl,
-                    )
-                )
+    `compact=True` reduce tamaños de fuente/altura y agrupa los
+    resultados estadísticos en un expander, para el layout en columnas
+    de los gráficos adicionales.
+    """
+    if filtered_local.empty or filtered_local["Casos"].dropna().empty:
+        st.info(f"No hay datos para **{site_val}** con la selección actual.")
+        return
 
-            # Línea de tendencia (regresión lineal simple) por región
-            if show_trend:
-                trend = linear_trend(sub["Anio"].to_numpy(), sub["Casos"].to_numpy())
-                if trend is not None:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=trend.x,
-                            y=trend.y_pred,
-                            name=f"Tendencia · {dept} (R²={trend.r2:.2f})",
-                            mode="lines",
-                            line=dict(width=1.6, color=color, dash="dot"),
-                            hoverinfo="skip",
-                        )
-                    )
-
-            # Línea temporal suavizada (LOWESS)
-            if show_smooth:
-                sm = smooth_series(sub["Anio"].to_numpy(), sub["Casos"].to_numpy(), frac=smooth_frac)
-                if sm is not None:
-                    sm_x, sm_y = sm
-                    fig.add_trace(
-                        go.Scatter(
-                            x=sm_x,
-                            y=sm_y,
-                            name=f"Suavizado (LOWESS) · {dept}",
-                            mode="lines",
-                            line=dict(width=2.5, color=color, shape="spline"),
-                            hoverinfo="skip",
-                        )
-                    )
-
-        # Detección de punto de quiebre estructural (una sola región)
-        bp_summary = None
-        if show_breakpoint and breakpoint_target:
-            sub_bp = filtered[filtered["Departamento"] == breakpoint_target]
-            bp = detect_breakpoint(sub_bp["Anio"].to_numpy(), sub_bp["Casos"].to_numpy())
-            if bp is None:
-                st.info(
-                    f"No hay suficientes años con datos en **{breakpoint_target}** "
-                    "para estimar un punto de quiebre (se requieren al menos 6)."
-                )
-            else:
-                bp_summary = bp
-                fig.add_trace(
-                    go.Scatter(
-                        x=bp.x_before, y=bp.y_pred_before, mode="lines",
-                        line=dict(width=2, color="black", dash="dash"),
-                        name=f"Tramo antes de {bp.year}", hoverinfo="skip",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=bp.x_after, y=bp.y_pred_after, mode="lines",
-                        line=dict(width=2, color="black", dash="dash"),
-                        name=f"Tramo desde {bp.year}", hoverinfo="skip",
-                    )
-                )
-                fig.add_vline(
-                    x=bp.year,
-                    line_width=1.5,
-                    line_dash="dash",
-                    line_color="black",
-                    annotation_text=f"Quiebre: {bp.year}",
-                    annotation_position="top",
-                )
-
-        # Test de tendencia Mann-Kendall + pendiente de Sen (una sola región,
-        # en el rango de años que el usuario elija, independiente del
-        # rango general del gráfico)
-        mk_summary = None
-        if show_mk and mk_target:
-            sub_mk = dept_casos_series(mk_target, site, mk_year_range[0], mk_year_range[1])
-            mkr = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
-            if mkr is None:
-                st.info(
-                    f"No hay suficientes años con datos en **{mk_target}** "
-                    f"entre {mk_year_range[0]} y {mk_year_range[1]} para el "
-                    "test de Mann-Kendall (se requieren al menos 6)."
-                )
-            else:
-                mk_summary = mkr
-                fig.add_trace(
-                    go.Scatter(
-                        x=mkr.x, y=mkr.y_sen, mode="lines",
-                        line=dict(width=2, color="#0f9b8e", dash="dashdot"),
-                        name=f"Pendiente de Sen · {mk_target}", hoverinfo="skip",
-                    )
-                )
-
-        # Quiebre en un año elegido por el usuario (evento específico)
-        arb_summary = None
-        if show_arbitrary_break and arb_target and arb_break_year is not None:
-            sub_arb = filtered[filtered["Departamento"] == arb_target]
-            arb = chow_test_arbitrary_break(
-                sub_arb["Anio"].to_numpy(),
-                sub_arb["Casos"].to_numpy(),
-                break_year=int(arb_break_year),
-                implementation_lag=int(arb_lag),
-            )
-            if arb is None:
-                st.info(
-                    f"No hay suficientes años antes/después de {int(arb_break_year)} "
-                    f"(considerando {int(arb_lag)} año(s) de implementación) en "
-                    f"**{arb_target}** para aplicar el test (se requieren al menos "
-                    "3 años a cada lado)."
-                )
-            else:
-                arb_summary = arb
-                fig.add_trace(
-                    go.Scatter(
-                        x=arb.x_before, y=arb.y_pred_before, mode="lines",
-                        line=dict(width=2, color="#e07a2c", dash="longdash"),
-                        name=f"Antes del evento ({arb.break_year})", hoverinfo="skip",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=arb.x_after, y=arb.y_pred_after, mode="lines",
-                        line=dict(width=2, color="#e07a2c", dash="longdash"),
-                        name=f"Después del evento", hoverinfo="skip",
-                    )
-                )
-                fig.add_vline(
-                    x=arb.break_year,
-                    line_width=1.5,
-                    line_dash="dot",
-                    line_color="#e07a2c",
-                    annotation_text=f"Evento: {arb.break_year}",
-                    annotation_position="bottom",
-                )
-                if arb.implementation_lag:
-                    fig.add_vrect(
-                        x0=arb.break_year,
-                        x1=arb.break_year + arb.implementation_lag,
-                        fillcolor="#e07a2c",
-                        opacity=0.10,
-                        line_width=0,
-                    )
-
-        fig.update_layout(
-            title=f"Casos de cáncer — {site}",
-            xaxis_title="Año",
-            yaxis_title="N° de casos nuevos",
-            yaxis_type="log" if log_scale else "linear",
-            barmode="group",
-            height=580,
-            template="plotly_white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            hovermode="x unified",
-            margin=dict(t=70, b=40),
+    fig = go.Figure()
+    for i, dept in enumerate(depts_selected):
+        sub = filtered_local[filtered_local["Departamento"] == dept]
+        color = (
+            color_overrides.get(dept, DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)])
+            if custom_colors
+            else DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)]
         )
-        all_years = sorted(filtered["Anio"].unique())
-        fig.update_xaxes(tickmode="array", tickvals=all_years, tickangle=45)
-        st.plotly_chart(fig, use_container_width=True)
+        mode = "lines+markers" if show_markers else "lines"
+        if show_labels:
+            mode += "+text"
+        raw_opacity = 0.35 if show_smooth else 1.0
 
-        if PERU_LABEL in depts_selected and peru_exclude:
-            st.caption(
-                f"ℹ️ El total de **{PERU_LABEL}** mostrado excluye: "
-                f"{', '.join(peru_exclude)} (configurado en el panel lateral)."
+        # "Mostrar etiquetas con ranking" es la única opción que NO se
+        # aplica a los gráficos compactos de "Comparar con otras
+        # localizaciones" — solo al gráfico principal.
+        if show_rank_labels and not compact:
+            rank_customdata = [top3_localizaciones(dept, y) for y in sub["Anio"]]
+            hover_tpl = (
+                "%{x}: %{y:,.0f} casos<br><br><b>Top 3 en " + dept + "</b><br>"
+                "%{customdata}<extra></extra>"
             )
+        else:
+            rank_customdata = None
+            hover_tpl = "%{x}: %{y:,.0f} casos<extra>" + dept + "</extra>"
 
-        if bp_summary is not None:
-            sig_txt = (
-                "**estadísticamente significativo**"
-                if bp_summary.significant
-                else "no alcanza significancia estadística"
+        if chart_type == "Línea":
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["Anio"],
+                    y=sub["Casos"],
+                    name=dept,
+                    mode=mode,
+                    line=dict(width=2.0 if compact else 2.5, color=color),
+                    marker=dict(size=4 if compact else 5),
+                    opacity=raw_opacity,
+                    text=sub["Casos"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else ""),
+                    textposition="top center",
+                    textfont=dict(size=8 if compact else 10, color=color),
+                    connectgaps=True,
+                    customdata=rank_customdata,
+                    hovertemplate=hover_tpl,
+                )
             )
-            st.markdown(
-                f"""
-                **📐 Punto de quiebre estimado para {breakpoint_target}: año {bp_summary.year}**
-                — el cambio de tendencia es {sig_txt} (test de Chow: F = {bp_summary.f_stat:.2f},
-                p = {bp_summary.p_value:.4f}).
-                Pendiente antes: {bp_summary.slope_before:+.1f} casos/año ·
-                pendiente después: {bp_summary.slope_after:+.1f} casos/año.
-                """
-            )
-
-        if mk_summary is not None:
-            trend_es = {
-                "increasing": "creciente 📈",
-                "decreasing": "decreciente 📉",
-                "no trend": "sin tendencia clara ➖",
-            }.get(mk_summary.trend, mk_summary.trend)
-            sig_txt = (
-                "**estadísticamente significativa**"
-                if mk_summary.significant
-                else "no alcanza significancia estadística (α=0.05)"
-            )
-            st.markdown(
-                f"""
-                **🧪 Mann-Kendall para {mk_target} ({mk_year_range[0]}–{mk_year_range[1]}): tendencia {trend_es}**
-                — {sig_txt} (z = {mk_summary.z_stat:.2f}, p = {mk_summary.p_value:.4f},
-                τ de Kendall = {mk_summary.tau:.2f}).
-                Pendiente de Sen: {mk_summary.sen_slope:+.1f} casos/año
-                (n = {mk_summary.n_obs} años; robusta a outliers, a diferencia de la
-                pendiente de mínimos cuadrados). Método: {mk_summary.method}.
-                """
-            )
-
-        if arb_summary is not None:
-            sig_txt = (
-                "**estadísticamente significativo**"
-                if arb_summary.significant
-                else "no alcanza significancia estadística"
-            )
-            lag_txt = (
-                f" (excluyendo {arb_summary.implementation_lag} año(s) de "
-                "implementación tras el evento)"
-                if arb_summary.implementation_lag
-                else ""
-            )
-            st.markdown(
-                f"""
-                **🏛️ Quiebre por evento en {arb_target}: año {arb_summary.break_year}**{lag_txt}
-                — el cambio de tendencia es {sig_txt} (test de Chow: F = {arb_summary.f_stat:.2f},
-                p = {arb_summary.p_value:.4f}).
-                Pendiente antes: {arb_summary.slope_before:+.1f} casos/año ·
-                pendiente después: {arb_summary.slope_after:+.1f} casos/año
-                (n antes = {arb_summary.n_before}, n después = {arb_summary.n_after}).
-                """
+        else:
+            fig.add_trace(
+                go.Bar(
+                    x=sub["Anio"],
+                    y=sub["Casos"],
+                    name=dept,
+                    marker_color=color,
+                    opacity=raw_opacity,
+                    text=sub["Casos"].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "")
+                    if show_labels
+                    else None,
+                    textposition="outside",
+                    customdata=rank_customdata,
+                    hovertemplate=hover_tpl,
+                )
             )
 
+        if show_trend:
+            trend = linear_trend(sub["Anio"].to_numpy(), sub["Casos"].to_numpy())
+            if trend is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=trend.x,
+                        y=trend.y_pred,
+                        name=f"Tendencia · {dept} (R²={trend.r2:.2f})",
+                        mode="lines",
+                        line=dict(width=1.6, color=color, dash="dot"),
+                        hoverinfo="skip",
+                    )
+                )
+
+        if show_smooth:
+            sm = smooth_series(sub["Anio"].to_numpy(), sub["Casos"].to_numpy(), frac=smooth_frac)
+            if sm is not None:
+                sm_x, sm_y = sm
+                fig.add_trace(
+                    go.Scatter(
+                        x=sm_x,
+                        y=sm_y,
+                        name=f"Suavizado (LOWESS) · {dept}",
+                        mode="lines",
+                        line=dict(width=2.5, color=color, shape="spline"),
+                        hoverinfo="skip",
+                    )
+                )
+
+    bp_summary = None
+    if show_breakpoint and breakpoint_target:
+        sub_bp = filtered_local[filtered_local["Departamento"] == breakpoint_target]
+        bp = detect_breakpoint(sub_bp["Anio"].to_numpy(), sub_bp["Casos"].to_numpy())
+        if bp is None:
+            st.info(
+                f"No hay suficientes años con datos en **{breakpoint_target}** "
+                f"({site_val}) para estimar un punto de quiebre (se requieren al menos 6)."
+            )
+        else:
+            bp_summary = bp
+            fig.add_trace(
+                go.Scatter(
+                    x=bp.x_before, y=bp.y_pred_before, mode="lines",
+                    line=dict(width=2, color="black", dash="dash"),
+                    name=f"Tramo antes de {bp.year}", hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=bp.x_after, y=bp.y_pred_after, mode="lines",
+                    line=dict(width=2, color="black", dash="dash"),
+                    name=f"Tramo desde {bp.year}", hoverinfo="skip",
+                )
+            )
+            fig.add_vline(
+                x=bp.year, line_width=1.5, line_dash="dash", line_color="black",
+                annotation_text=f"Quiebre: {bp.year}", annotation_position="top",
+            )
+
+    mk_summary = None
+    if show_mk and mk_target:
+        sub_mk = dept_casos_series(mk_target, site_val, mk_year_range[0], mk_year_range[1])
+        mkr = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
+        if mkr is None:
+            st.info(
+                f"No hay suficientes años con datos en **{mk_target}** ({site_val}) "
+                f"entre {mk_year_range[0]} y {mk_year_range[1]} para el test de "
+                "Mann-Kendall (se requieren al menos 6)."
+            )
+        else:
+            mk_summary = mkr
+            fig.add_trace(
+                go.Scatter(
+                    x=mkr.x, y=mkr.y_sen, mode="lines",
+                    line=dict(width=2, color="#0f9b8e", dash="dashdot"),
+                    name=f"Pendiente de Sen · {mk_target}", hoverinfo="skip",
+                )
+            )
+
+    arb_summary = None
+    if show_arbitrary_break and arb_target and arb_break_year is not None:
+        sub_arb = filtered_local[filtered_local["Departamento"] == arb_target]
+        arb = chow_test_arbitrary_break(
+            sub_arb["Anio"].to_numpy(),
+            sub_arb["Casos"].to_numpy(),
+            break_year=int(arb_break_year),
+            implementation_lag=int(arb_lag),
+        )
+        if arb is None:
+            st.info(
+                f"No hay suficientes años antes/después de {int(arb_break_year)} "
+                f"(considerando {int(arb_lag)} año(s) de implementación) en "
+                f"**{arb_target}** ({site_val}) para aplicar el test (se requieren al "
+                "menos 3 años a cada lado)."
+            )
+        else:
+            arb_summary = arb
+            fig.add_trace(
+                go.Scatter(
+                    x=arb.x_before, y=arb.y_pred_before, mode="lines",
+                    line=dict(width=2, color="#e07a2c", dash="longdash"),
+                    name=f"Antes del evento ({arb.break_year})", hoverinfo="skip",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=arb.x_after, y=arb.y_pred_after, mode="lines",
+                    line=dict(width=2, color="#e07a2c", dash="longdash"),
+                    name="Después del evento", hoverinfo="skip",
+                )
+            )
+            fig.add_vline(
+                x=arb.break_year, line_width=1.5, line_dash="dot", line_color="#e07a2c",
+                annotation_text=f"Evento: {arb.break_year}", annotation_position="bottom",
+            )
+            if arb.implementation_lag:
+                fig.add_vrect(
+                    x0=arb.break_year, x1=arb.break_year + arb.implementation_lag,
+                    fillcolor="#e07a2c", opacity=0.10, line_width=0,
+                )
+
+    fig.update_layout(
+        title=f"Casos de cáncer — {site_val}",
+        xaxis_title="Año",
+        yaxis_title="N° de casos nuevos",
+        yaxis_type="log" if log_scale else "linear",
+        barmode="group",
+        height=320 if compact else 580,
+        template="plotly_white",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, x=0,
+            font=dict(size=10 if compact else 12),
+        ),
+        hovermode="x unified",
+        margin=dict(t=60 if compact else 70, b=40),
+        font=dict(size=11 if compact else 13),
+    )
+    all_years_local = sorted(filtered_local["Anio"].unique())
+    fig.update_xaxes(
+        tickmode="array", tickvals=all_years_local, tickangle=45,
+        tickfont=dict(size=9 if compact else 11),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"site_chart_{key_suffix}")
+
+    if PERU_LABEL in depts_selected and peru_exclude:
+        st.caption(
+            f"ℹ️ El total de **{PERU_LABEL}** mostrado excluye: "
+            f"{', '.join(peru_exclude)} (configurado en el panel lateral)."
+        )
+
+    summary_blocks = []
+    if bp_summary is not None:
+        sig_txt = (
+            "**estadísticamente significativo**"
+            if bp_summary.significant
+            else "no alcanza significancia estadística"
+        )
+        summary_blocks.append(
+            f"**📐 Punto de quiebre estimado para {breakpoint_target} ({site_val}): "
+            f"año {bp_summary.year}** — el cambio de tendencia es {sig_txt} "
+            f"(test de Chow: F = {bp_summary.f_stat:.2f}, p = {bp_summary.p_value:.4f}). "
+            f"Pendiente antes: {bp_summary.slope_before:+.1f} casos/año · "
+            f"pendiente después: {bp_summary.slope_after:+.1f} casos/año."
+        )
+    if mk_summary is not None:
+        trend_es = {
+            "increasing": "creciente 📈",
+            "decreasing": "decreciente 📉",
+            "no trend": "sin tendencia clara ➖",
+        }.get(mk_summary.trend, mk_summary.trend)
+        sig_txt = (
+            "**estadísticamente significativa**"
+            if mk_summary.significant
+            else "no alcanza significancia estadística (α=0.05)"
+        )
+        summary_blocks.append(
+            f"**🧪 Mann-Kendall para {mk_target} ({site_val}, "
+            f"{mk_year_range[0]}–{mk_year_range[1]}): tendencia {trend_es}** — {sig_txt} "
+            f"(z = {mk_summary.z_stat:.2f}, p = {mk_summary.p_value:.4f}, "
+            f"τ de Kendall = {mk_summary.tau:.2f}). "
+            f"Pendiente de Sen: {mk_summary.sen_slope:+.1f} casos/año "
+            f"(n = {mk_summary.n_obs} años; robusta a outliers, a diferencia de la "
+            f"pendiente de mínimos cuadrados). Método: {mk_summary.method}."
+        )
+    if arb_summary is not None:
+        sig_txt = (
+            "**estadísticamente significativo**"
+            if arb_summary.significant
+            else "no alcanza significancia estadística"
+        )
+        lag_txt = (
+            f" (excluyendo {arb_summary.implementation_lag} año(s) de "
+            "implementación tras el evento)"
+            if arb_summary.implementation_lag
+            else ""
+        )
+        summary_blocks.append(
+            f"**🏛️ Quiebre por evento en {arb_target} ({site_val}): "
+            f"año {arb_summary.break_year}**{lag_txt} — el cambio de tendencia es "
+            f"{sig_txt} (test de Chow: F = {arb_summary.f_stat:.2f}, "
+            f"p = {arb_summary.p_value:.4f}). "
+            f"Pendiente antes: {arb_summary.slope_before:+.1f} casos/año · "
+            f"pendiente después: {arb_summary.slope_after:+.1f} casos/año "
+            f"(n antes = {arb_summary.n_before}, n después = {arb_summary.n_after})."
+        )
+
+    if summary_blocks:
+        if compact:
+            with st.expander("📊 Detalles del análisis estadístico"):
+                for block in summary_blocks:
+                    st.markdown(block)
+        else:
+            for block in summary_blocks:
+                st.markdown(block)
+
+    if not compact:
         st.markdown(
             '<p class="source-note">Nota: los valores corresponden a casos '
             "nuevos registrados por el INEN, no a tasas ajustadas por edad "
@@ -992,6 +1061,41 @@ with tab_graph:
             unsafe_allow_html=True,
         )
 
+
+with tab_graph:
+    render_site_analysis_chart(site, filtered, compact=False, key_suffix="main")
+
+    # -----------------------------------------------------------------
+    # Gráficos adicionales: comparar simultáneamente otras localizaciones
+    # del tumor primario, cada una en su propio gráfico más compacto (2
+    # por fila), con el mismo análisis estadístico y personalización de
+    # colores que el gráfico principal.
+    # -----------------------------------------------------------------
+    extra_sites_to_plot = [s for s in extra_sites if s != site]
+    if show_extra_sites and extra_sites_to_plot:
+        st.markdown("---")
+        st.markdown("#### Comparar con otras localizaciones")
+        for row_start in range(0, len(extra_sites_to_plot), 2):
+            row_sites = extra_sites_to_plot[row_start : row_start + 2]
+            cols = st.columns(len(row_sites))
+            for col, extra_site in zip(cols, row_sites):
+                with col:
+                    extra_frames = []
+                    for dept in depts_selected:
+                        sub_extra = dept_casos_series(
+                            dept, extra_site, year_range[0], year_range[1]
+                        ).copy()
+                        sub_extra["Departamento"] = dept
+                        extra_frames.append(sub_extra)
+                    extra_filtered = (
+                        pd.concat(extra_frames, ignore_index=True)
+                        if extra_frames
+                        else pd.DataFrame(columns=["Anio", "Casos", "Departamento"])
+                    )
+                    render_site_analysis_chart(
+                        extra_site, extra_filtered, compact=True,
+                        key_suffix=f"extra_{extra_site}",
+                    )
 with tab_table:
     pivot = filtered.pivot_table(
         index="Departamento", columns="Anio", values="Casos", aggfunc="sum"
@@ -1415,6 +1519,124 @@ with tab_ranking_anim:
                             "animación interactiva de arriba funciona igual."
                         )
 
+def render_projection_chart(site_val: str, compact: bool = False, key_suffix: str = "") -> None:
+    """Construye y renderiza la proyección de casos (3 escenarios +
+    banda de incertidumbre) para una localización del tumor primario
+    dada. La usan tanto la proyección principal como las proyecciones
+    adicionales de otras localizaciones."""
+    sub_proj = dept_casos_series(proj_target, site_val, year_range[0], year_range[1])
+    proj = project_series(
+        sub_proj["Anio"].to_numpy(), sub_proj["Casos"].to_numpy(), horizon=proj_horizon
+    )
+    if proj is None:
+        st.warning(
+            f"No hay suficientes años con datos en **{proj_target}** ({site_val}) "
+            "para proyectar (se requieren al menos 6)."
+        )
+        return
+
+    st.markdown(
+        f"#### Proyección de casos — {site_val} · {proj_target} "
+        f"({int(proj.years_future[0])}–{int(proj.years_future[-1])})"
+    )
+    if not compact:
+        st.caption(proj.method_note)
+
+    fig_proj = go.Figure()
+    fig_proj.add_trace(
+        go.Scatter(
+            x=proj.years_hist, y=proj.values_hist, name="Histórico",
+            mode="lines+markers", line=dict(width=2.0 if compact else 2.5, color=ACCENT_COLOR),
+        )
+    )
+    fig_proj.add_trace(
+        go.Scatter(
+            x=np.concatenate([proj.years_future, proj.years_future[::-1]]),
+            y=np.concatenate([proj.recommended_upper, proj.recommended_lower[::-1]]),
+            fill="toself", fillcolor="rgba(47,111,168,0.15)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="Banda de incertidumbre (90%)", hoverinfo="skip",
+        )
+    )
+    fig_proj.add_trace(
+        go.Scatter(
+            x=proj.years_future, y=proj.recommended,
+            name="Recomendado (Holt amortiguado)",
+            mode="lines+markers", line=dict(width=2.0 if compact else 2.5, color=SECONDARY_COLOR),
+        )
+    )
+    fig_proj.add_trace(
+        go.Scatter(
+            x=proj.years_future, y=proj.conservative,
+            name="Conservador (promedio reciente, plano)",
+            mode="lines", line=dict(width=2, color="#7d7d7d", dash="dot"),
+        )
+    )
+    fig_proj.add_trace(
+        go.Scatter(
+            x=proj.years_future, y=proj.optimistic,
+            name="Lineal (pendiente de Sen, sin amortiguar)",
+            mode="lines", line=dict(width=2, color="#c94141", dash="dash"),
+        )
+    )
+    fig_proj.update_layout(
+        xaxis_title="Año", yaxis_title="N° de casos (proyectado)",
+        height=320 if compact else 520,
+        template="plotly_white",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, x=0,
+            font=dict(size=10 if compact else 12),
+        ),
+        hovermode="x unified", margin=dict(t=40, b=40),
+        font=dict(size=11 if compact else 13),
+    )
+    all_proj_years = list(proj.years_hist) + list(proj.years_future)
+    fig_proj.update_xaxes(
+        tickmode="array", tickvals=all_proj_years, tickangle=45,
+        tickfont=dict(size=9 if compact else 11),
+    )
+    st.plotly_chart(fig_proj, use_container_width=True, key=f"proj_chart_{key_suffix}")
+
+    table_proj = pd.DataFrame(
+        {
+            "Año": proj.years_future.astype(int),
+            "Conservador": proj.conservative.round(0),
+            "Recomendado": proj.recommended.round(0),
+            "Recomendado (banda 90%)": [
+                f"{lo:,.0f} – {hi:,.0f}"
+                for lo, hi in zip(proj.recommended_lower, proj.recommended_upper)
+            ],
+            "Lineal (Sen)": proj.optimistic.round(0),
+        }
+    ).set_index("Año")
+
+    if compact:
+        with st.expander("📋 Tabla de escenarios"):
+            st.dataframe(table_proj, use_container_width=True)
+    else:
+        st.markdown("##### Tabla de escenarios")
+        st.dataframe(table_proj, use_container_width=True)
+
+    proj_csv = table_proj.to_csv().encode("utf-8")
+    st.download_button(
+        "Descargar proyección (CSV)",
+        data=proj_csv,
+        file_name=f"proyeccion_{site_val.replace(' ', '_')}_{proj_target.replace(' ', '_')}.csv",
+        mime="text/csv",
+        key=f"proj_dl_{key_suffix}",
+    )
+
+    if not compact:
+        st.markdown(
+            '<p class="source-note">⚠️ Toda proyección es una extrapolación '
+            "estadística del comportamiento histórico y no reemplaza la "
+            "planificación epidemiológica basada en programas de tamizaje, "
+            "cambios demográficos u otros factores no capturados por el "
+            "modelo. Úsala como referencia de escenarios, no como cifra única.</p>",
+            unsafe_allow_html=True,
+        )
+
+
 with tab_projection:
     if not show_projection or not proj_target:
         st.info(
@@ -1423,101 +1645,20 @@ with tab_projection:
             "relativamente completa (pocos años sin datos)."
         )
     else:
-        sub_proj = filtered[filtered["Departamento"] == proj_target]
-        proj = project_series(
-            sub_proj["Anio"].to_numpy(), sub_proj["Casos"].to_numpy(), horizon=proj_horizon
-        )
-        if proj is None:
-            st.warning(
-                f"No hay suficientes años con datos en **{proj_target}** para "
-                "proyectar (se requieren al menos 6)."
-            )
-        else:
-            st.markdown(
-                f"#### Proyección de casos — {site} · {proj_target} "
-                f"({int(proj.years_future[0])}–{int(proj.years_future[-1])})"
-            )
-            st.caption(proj.method_note)
+        render_projection_chart(site, compact=False, key_suffix="main")
 
-            fig_proj = go.Figure()
-            fig_proj.add_trace(
-                go.Scatter(
-                    x=proj.years_hist, y=proj.values_hist, name="Histórico",
-                    mode="lines+markers", line=dict(width=2.5, color=ACCENT_COLOR),
-                )
-            )
-            # Banda de incertidumbre del escenario recomendado
-            fig_proj.add_trace(
-                go.Scatter(
-                    x=np.concatenate([proj.years_future, proj.years_future[::-1]]),
-                    y=np.concatenate([proj.recommended_upper, proj.recommended_lower[::-1]]),
-                    fill="toself", fillcolor="rgba(47,111,168,0.15)",
-                    line=dict(color="rgba(0,0,0,0)"),
-                    name=f"Banda de incertidumbre (90%)", hoverinfo="skip",
-                )
-            )
-            fig_proj.add_trace(
-                go.Scatter(
-                    x=proj.years_future, y=proj.recommended,
-                    name="Recomendado (Holt amortiguado)",
-                    mode="lines+markers", line=dict(width=2.5, color=SECONDARY_COLOR),
-                )
-            )
-            fig_proj.add_trace(
-                go.Scatter(
-                    x=proj.years_future, y=proj.conservative,
-                    name="Conservador (promedio reciente, plano)",
-                    mode="lines", line=dict(width=2, color="#7d7d7d", dash="dot"),
-                )
-            )
-            fig_proj.add_trace(
-                go.Scatter(
-                    x=proj.years_future, y=proj.optimistic,
-                    name="Lineal (pendiente de Sen, sin amortiguar)",
-                    mode="lines", line=dict(width=2, color="#c94141", dash="dash"),
-                )
-            )
-            fig_proj.update_layout(
-                xaxis_title="Año", yaxis_title="N° de casos (proyectado)",
-                height=520, template="plotly_white",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                hovermode="x unified", margin=dict(t=40, b=40),
-            )
-            all_proj_years = list(proj.years_hist) + list(proj.years_future)
-            fig_proj.update_xaxes(tickmode="array", tickvals=all_proj_years, tickangle=45)
-            st.plotly_chart(fig_proj, use_container_width=True)
-
-            st.markdown("##### Tabla de escenarios")
-            table_proj = pd.DataFrame(
-                {
-                    "Año": proj.years_future.astype(int),
-                    "Conservador": proj.conservative.round(0),
-                    "Recomendado": proj.recommended.round(0),
-                    "Recomendado (banda 90%)": [
-                        f"{lo:,.0f} – {hi:,.0f}"
-                        for lo, hi in zip(proj.recommended_lower, proj.recommended_upper)
-                    ],
-                    "Lineal (Sen)": proj.optimistic.round(0),
-                }
-            ).set_index("Año")
-            st.dataframe(table_proj, use_container_width=True)
-
-            proj_csv = table_proj.to_csv().encode("utf-8")
-            st.download_button(
-                "Descargar proyección (CSV)",
-                data=proj_csv,
-                file_name=f"proyeccion_{site.replace(' ', '_')}_{proj_target.replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
-
-            st.markdown(
-                '<p class="source-note">⚠️ Toda proyección es una extrapolación '
-                "estadística del comportamiento histórico y no reemplaza la "
-                "planificación epidemiológica basada en programas de tamizaje, "
-                "cambios demográficos u otros factores no capturados por el "
-                "modelo. Úsala como referencia de escenarios, no como cifra única.</p>",
-                unsafe_allow_html=True,
-            )
+        extra_sites_to_plot = [s for s in extra_sites if s != site]
+        if show_extra_sites and extra_sites_to_plot:
+            st.markdown("---")
+            st.markdown("#### Proyección para otras localizaciones")
+            for row_start in range(0, len(extra_sites_to_plot), 2):
+                row_sites = extra_sites_to_plot[row_start : row_start + 2]
+                cols = st.columns(len(row_sites))
+                for col, extra_site in zip(cols, row_sites):
+                    with col:
+                        render_projection_chart(
+                            extra_site, compact=True, key_suffix=f"extra_{extra_site}"
+                        )
 
 with tab_downloads:
     st.write("Descarga los datos filtrados actualmente en el panel:")
@@ -1543,6 +1684,535 @@ with tab_downloads:
         file_name="cancer_inen_dataset_completo.csv",
         mime="text/csv",
     )
+
+# ---------------------------------------------------------------------------
+# Reporte ejecutivo (PDF / PPTX)
+# ---------------------------------------------------------------------------
+
+
+def _mpl_timeseries_chart(filtered_local: pd.DataFrame, depts: list[str], title: str) -> bytes:
+    """Versión estática (matplotlib) del gráfico de casos por año y
+    departamento, para incrustar en el reporte descargable."""
+    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=140)
+    for i, dept in enumerate(depts):
+        sub = filtered_local[filtered_local["Departamento"] == dept].sort_values("Anio")
+        if sub["Casos"].dropna().empty:
+            continue
+        color = (
+            color_overrides.get(dept, DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)])
+            if custom_colors
+            else DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)]
+        )
+        ax.plot(
+            sub["Anio"], sub["Casos"], marker="o", markersize=3, linewidth=2,
+            label=dept, color=color,
+        )
+    ax.set_title(title, fontsize=13, fontweight="bold", loc="left")
+    ax.set_xlabel("Año")
+    ax.set_ylabel("N° de casos nuevos")
+    ax.legend(fontsize=8, loc="upper left", ncol=min(len(depts), 3))
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _mpl_rank_chart(rank_data_local: pd.DataFrame, title: str, base_color: str = PRIMARY_COLOR) -> bytes:
+    """Versión estática (matplotlib) del ranking de localizaciones, para
+    incrustar en el reporte descargable."""
+    n = len(rank_data_local)
+    colors = shades_of(base_color, n)
+    fig, ax = plt.subplots(figsize=(9, max(3, 0.4 * n) + 1), dpi=140)
+    ax.barh(range(n), rank_data_local["Casos"], color=colors)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(
+        [f"{r}° {name}" for r, name in enumerate(rank_data_local["Localizacion"], start=1)],
+        fontsize=9,
+    )
+    max_val = rank_data_local["Casos"].max()
+    for i, val in enumerate(rank_data_local["Casos"]):
+        ax.text(val + max_val * 0.01, i, f"{val:,.0f}", va="center", fontsize=8)
+    ax.set_title(title, fontsize=13, fontweight="bold", loc="left")
+    ax.set_xlabel("N° de casos nuevos")
+    ax.invert_yaxis()
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _mpl_projection_chart(proj, title: str) -> bytes:
+    """Versión estática (matplotlib) del gráfico de proyección, para
+    incrustar en el reporte descargable."""
+    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=140)
+    ax.plot(
+        proj.years_hist, proj.values_hist, marker="o", markersize=3,
+        linewidth=2, color=ACCENT_COLOR, label="Histórico",
+    )
+    ax.fill_between(
+        proj.years_future, proj.recommended_lower, proj.recommended_upper,
+        color=SECONDARY_COLOR, alpha=0.15, label="Banda 90%",
+    )
+    ax.plot(
+        proj.years_future, proj.recommended, marker="o", markersize=3,
+        linewidth=2, color=SECONDARY_COLOR, label="Recomendado",
+    )
+    ax.plot(
+        proj.years_future, proj.conservative, linestyle=":", linewidth=1.6,
+        color="#7d7d7d", label="Conservador",
+    )
+    ax.plot(
+        proj.years_future, proj.optimistic, linestyle="--", linewidth=1.6,
+        color="#c94141", label="Lineal (Sen)",
+    )
+    ax.set_title(title, fontsize=13, fontweight="bold", loc="left")
+    ax.set_xlabel("Año")
+    ax.set_ylabel("N° de casos (proyectado)")
+    ax.legend(fontsize=8, loc="upper left")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def compute_site_summaries(site_val: str, filtered_local: pd.DataFrame) -> dict:
+    """Calcula (sin renderizar nada en pantalla) los resúmenes
+    estadísticos de una localización — tendencia/quiebre/Mann-Kendall/
+    evento — según los controles del panel lateral, para el reporte."""
+    bp_summary = None
+    if show_breakpoint and breakpoint_target:
+        sub_bp = filtered_local[filtered_local["Departamento"] == breakpoint_target]
+        bp_summary = detect_breakpoint(sub_bp["Anio"].to_numpy(), sub_bp["Casos"].to_numpy())
+
+    mk_summary = None
+    if show_mk and mk_target:
+        sub_mk = dept_casos_series(mk_target, site_val, mk_year_range[0], mk_year_range[1])
+        mk_summary = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
+
+    arb_summary = None
+    if show_arbitrary_break and arb_target and arb_break_year is not None:
+        sub_arb = filtered_local[filtered_local["Departamento"] == arb_target]
+        arb_summary = chow_test_arbitrary_break(
+            sub_arb["Anio"].to_numpy(), sub_arb["Casos"].to_numpy(),
+            break_year=int(arb_break_year), implementation_lag=int(arb_lag),
+        )
+    return {"bp": bp_summary, "mk": mk_summary, "arb": arb_summary}
+
+
+def format_summary_lines(site_val: str, summaries: dict) -> list[str]:
+    """Texto plano de los resúmenes estadísticos, para el reporte."""
+    lines = []
+    bp = summaries.get("bp")
+    if bp is not None:
+        sig = "estadísticamente significativo" if bp.significant else "no alcanza significancia estadística"
+        lines.append(
+            f"Quiebre estimado para {breakpoint_target} ({site_val}): año {bp.year} — {sig} "
+            f"(test de Chow: F={bp.f_stat:.2f}, p={bp.p_value:.4f}). "
+            f"Pendiente antes: {bp.slope_before:+.1f} casos/año, después: {bp.slope_after:+.1f} casos/año."
+        )
+    mk = summaries.get("mk")
+    if mk is not None:
+        trend_es = {
+            "increasing": "creciente", "decreasing": "decreciente", "no trend": "sin tendencia clara",
+        }.get(mk.trend, mk.trend)
+        sig = "significativa" if mk.significant else "no significativa"
+        lines.append(
+            f"Mann-Kendall para {mk_target} ({site_val}, {mk_year_range[0]}–{mk_year_range[1]}): "
+            f"tendencia {trend_es} — {sig} (p={mk.p_value:.4f}). "
+            f"Pendiente de Sen: {mk.sen_slope:+.1f} casos/año."
+        )
+    arb = summaries.get("arb")
+    if arb is not None:
+        sig = "estadísticamente significativo" if arb.significant else "no alcanza significancia estadística"
+        lines.append(
+            f"Quiebre por evento en {arb_target} ({site_val}): año {arb.break_year} — {sig} "
+            f"(test de Chow: F={arb.f_stat:.2f}, p={arb.p_value:.4f})."
+        )
+    return lines
+
+
+def build_report_sections(
+    inc_kpis: bool, inc_main_chart: bool, inc_extra_charts: bool, inc_stats: bool,
+    inc_ranking: bool, inc_projection: bool, inc_table: bool,
+) -> list[dict]:
+    """Arma la lista de secciones del reporte (cada una con encabezado,
+    texto, imagen y/o tabla) a partir de las casillas elegidas por el
+    usuario, reutilizando exactamente los mismos datos y ajustes
+    (localización, departamentos, exclusiones, análisis, proyección)
+    configurados en el resto del dashboard."""
+    sections: list[dict] = []
+
+    if inc_kpis:
+        kpi_lines = [
+            f"Localización del tumor primario: {site}",
+            f"Departamento(s) de residencia: {format_region_list(depts_selected, max_show=10)}",
+            f"Variación {year_a} → {year_b}: " + (f"{delta_pct:+.1f}%" if pd.notna(delta_pct) else "s/d"),
+            "Cambio absoluto: " + (f"{delta_abs:+,.0f} casos" if pd.notna(delta_abs) else "s/d"),
+            "CAGR (crecimiento anual compuesto): " + (f"{cagr * 100:+.1f}%/año" if pd.notna(cagr) else "s/d"),
+            "Año pico: " + (f"{peak_year} · {peak_val:,.0f} casos" if peak_year is not None else "s/d"),
+        ]
+        if mk_kpi is not None:
+            trend_word = {
+                "increasing": "Creciente", "decreasing": "Decreciente", "no trend": "Sin tendencia clara",
+            }.get(mk_kpi.trend, mk_kpi.trend)
+            kpi_lines.append(f"Tendencia general (Mann-Kendall): {trend_word} (p={mk_kpi.p_value:.3f})")
+        if PERU_LABEL in depts_selected and peru_exclude:
+            kpi_lines.append(f"El total de {PERU_LABEL} excluye: {', '.join(peru_exclude)}.")
+        sections.append({"heading": "Resumen ejecutivo", "text": kpi_lines})
+
+    if inc_main_chart:
+        img = _mpl_timeseries_chart(filtered, depts_selected, f"Casos de cáncer — {site}")
+        sec = {"heading": f"Gráfico — {site}", "image_bytes": img}
+        if inc_stats:
+            lines = format_summary_lines(site, compute_site_summaries(site, filtered))
+            if lines:
+                sec["text"] = lines
+        sections.append(sec)
+
+    if inc_extra_charts and show_extra_sites:
+        for extra_site in [s for s in extra_sites if s != site]:
+            extra_frames = []
+            for dept in depts_selected:
+                sub_extra = dept_casos_series(dept, extra_site, year_range[0], year_range[1]).copy()
+                sub_extra["Departamento"] = dept
+                extra_frames.append(sub_extra)
+            extra_filtered = (
+                pd.concat(extra_frames, ignore_index=True) if extra_frames else pd.DataFrame()
+            )
+            if extra_filtered.empty or extra_filtered["Casos"].dropna().empty:
+                continue
+            img = _mpl_timeseries_chart(extra_filtered, depts_selected, f"Casos de cáncer — {extra_site}")
+            sec = {"heading": f"Gráfico — {extra_site}", "image_bytes": img}
+            if inc_stats:
+                lines = format_summary_lines(extra_site, compute_site_summaries(extra_site, extra_filtered))
+                if lines:
+                    sec["text"] = lines
+            sections.append(sec)
+
+    if inc_ranking:
+        rank_data_report = get_year_ranking(rank_dept, rank_year, exclude=rank_exclude, top_n=rank_top_n)
+        if not rank_data_report.empty:
+            base_color = color_overrides.get(rank_dept, PRIMARY_COLOR) if custom_colors else PRIMARY_COLOR
+            img = _mpl_rank_chart(
+                rank_data_report, f"Ranking de cánceres — {rank_dept}, {rank_year}", base_color=base_color
+            )
+            table_data = [["Puesto", "Localización", "Casos"]] + [
+                [str(i + 1), row.Localizacion, f"{row.Casos:,.0f}"]
+                for i, row in enumerate(rank_data_report.itertuples())
+            ]
+            sections.append({
+                "heading": f"Ranking — {rank_dept}, {rank_year}",
+                "image_bytes": img,
+                "table_data": table_data,
+            })
+
+    if inc_projection and show_projection and proj_target:
+        sub_proj = dept_casos_series(proj_target, site, year_range[0], year_range[1])
+        proj = project_series(sub_proj["Anio"].to_numpy(), sub_proj["Casos"].to_numpy(), horizon=proj_horizon)
+        if proj is not None:
+            img = _mpl_projection_chart(proj, f"Proyección — {site} · {proj_target}")
+            table_data = [["Año", "Conservador", "Recomendado", "Banda 90%", "Lineal (Sen)"]] + [
+                [str(int(y)), f"{c:,.0f}", f"{r:,.0f}", f"{lo:,.0f}–{hi:,.0f}", f"{o:,.0f}"]
+                for y, c, r, lo, hi, o in zip(
+                    proj.years_future, proj.conservative, proj.recommended,
+                    proj.recommended_lower, proj.recommended_upper, proj.optimistic,
+                )
+            ]
+            sections.append({
+                "heading": f"Proyección — {site} · {proj_target}",
+                "image_bytes": img,
+                "table_data": table_data,
+                "text": [proj.method_note],
+            })
+
+    if inc_table:
+        # Se transpone (años como filas) para que la tabla quepa en el
+        # ancho de la página A4 y se pagine sola si hay muchos años —
+        # con años como columnas, una serie larga se corta al borde.
+        pivot_report = filtered.pivot_table(index="Departamento", columns="Anio", values="Casos", aggfunc="sum")
+        header = ["Año"] + list(pivot_report.index)
+        rows = [header]
+        for year_col in pivot_report.columns:
+            row_vals = [
+                f"{v:,.0f}" if pd.notna(v) else "—" for v in pivot_report[year_col]
+            ]
+            rows.append([str(int(year_col))] + row_vals)
+        sections.append({"heading": f"Tabla de datos — {site}", "table_data": rows})
+
+    return sections
+
+
+def build_pdf_report(sections: list[dict], report_title: str) -> bytes:
+    """Arma el PDF (A4) del reporte con reportlab (sin dependencias de
+    sistema como Chrome/LibreOffice). Cada gráfico o tabla ocupa su
+    propia página — si una sección tiene ambos (p. ej. Proyección), el
+    gráfico va en una página y la tabla en la siguiente."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+        leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleCustom", parent=styles["Title"], textColor=rl_colors.HexColor(ACCENT_COLOR),
+    )
+    h2_style = ParagraphStyle(
+        "H2Custom", parent=styles["Heading2"], textColor=rl_colors.HexColor(ACCENT_COLOR),
+        spaceBefore=14,
+    )
+    body_style = styles["BodyText"]
+
+    story = [
+        Paragraph(report_title, title_style),
+        Paragraph(f"Generado el {datetime.now():%d/%m/%Y %H:%M}", styles["Normal"]),
+    ]
+
+    for sec in sections:
+        story.append(PageBreak())
+        story.append(Paragraph(sec["heading"], h2_style))
+        if sec.get("text"):
+            for line in sec["text"]:
+                story.append(Paragraph(line, body_style))
+            story.append(Spacer(1, 0.3 * cm))
+
+        if sec.get("image_bytes"):
+            # El gráfico usa la mayor parte de la página, ya que tiene
+            # toda la hoja para él solo.
+            story.append(RLImage(io.BytesIO(sec["image_bytes"]), width=17 * cm, height=9.6 * cm))
+
+        if sec.get("table_data"):
+            if sec.get("image_bytes"):
+                # El gráfico ya ocupó esta página: la tabla pasa a la
+                # siguiente, cada elemento en su propia hoja.
+                story.append(PageBreak())
+                story.append(Paragraph(f"{sec['heading']} — tabla", h2_style))
+            t = Table(sec["table_data"], hAlign="LEFT", repeatRows=1)
+            t.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor(ACCENT_COLOR)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#f7f7fb")]),
+            ]))
+            story.append(t)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_pptx_report(sections: list[dict], report_title: str) -> bytes:
+    """Arma la presentación PPTX del reporte con python-pptx (sin
+    dependencias de sistema). Cada gráfico o tabla ocupa su propia
+    diapositiva — si una sección tiene ambos (p. ej. Proyección), el
+    gráfico va en una diapositiva y la tabla en la siguiente."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    accent_rgb = RGBColor.from_string(ACCENT_COLOR.lstrip("#"))
+
+    def add_heading(slide, heading_text: str) -> None:
+        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.3), Inches(0.8))
+        title_box.text_frame.text = heading_text
+        title_box.text_frame.paragraphs[0].font.size = Pt(28)
+        title_box.text_frame.paragraphs[0].font.bold = True
+        title_box.text_frame.paragraphs[0].font.color.rgb = accent_rgb
+
+    def add_text_block(slide, lines: list[str] | None, y_cursor: float) -> float:
+        if not lines:
+            return y_cursor
+        body_box = slide.shapes.add_textbox(Inches(0.5), Inches(y_cursor), Inches(12.3), Inches(1.8))
+        tf = body_box.text_frame
+        tf.word_wrap = True
+        # Estima cuántas líneas ocupará cada párrafo al envolverse, para
+        # reservar el espacio real (una nota larga puede ocupar 3-4
+        # líneas) y que el gráfico de abajo no quede superpuesto.
+        chars_per_line = 128  # aprox. para Pt(14) en un ancho de 12.3"
+        total_lines = 0
+        for i, line in enumerate(lines):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.text = line
+            p.font.size = Pt(14)
+            total_lines += max(1, -(-len(line) // chars_per_line))  # ceil
+        return y_cursor + 0.30 + 0.27 * total_lines
+
+    def add_table(slide, table_data: list[list[str]], y_cursor: float) -> None:
+        # Las diapositivas no paginan: si la tabla es muy larga, se
+        # muestran solo las filas más recientes con una nota (el PDF sí
+        # incluye la tabla completa, paginada automáticamente).
+        max_rows_per_slide = 16
+        full_len = len(table_data)
+        if full_len > max_rows_per_slide:
+            header_row = table_data[0]
+            kept_rows = table_data[-(max_rows_per_slide - 1):]
+            table_data = [header_row] + kept_rows
+            note_box = slide.shapes.add_textbox(Inches(0.7), Inches(y_cursor), Inches(11.9), Inches(0.35))
+            note_box.text_frame.text = (
+                f"Mostrando los últimos {len(kept_rows)} registros de "
+                f"{full_len - 1} (tabla completa en la versión PDF)."
+            )
+            note_box.text_frame.paragraphs[0].font.size = Pt(11)
+            note_box.text_frame.paragraphs[0].font.italic = True
+            y_cursor += 0.4
+
+        rows = len(table_data)
+        cols = len(table_data[0])
+        table_shape = slide.shapes.add_table(
+            rows, cols, Inches(0.7), Inches(y_cursor), Inches(11.9), Inches(min(5.5, 0.35 * rows))
+        )
+        table = table_shape.table
+        for r, row_vals in enumerate(table_data):
+            for c, val in enumerate(row_vals):
+                cell = table.cell(r, c)
+                cell.text = str(val)
+                for para in cell.text_frame.paragraphs:
+                    para.font.size = Pt(10)
+
+    slide = prs.slides.add_slide(blank)
+    tx = slide.shapes.add_textbox(Inches(0.8), Inches(2.6), Inches(11.7), Inches(1.5))
+    tf = tx.text_frame
+    tf.text = report_title
+    tf.paragraphs[0].font.size = Pt(40)
+    tf.paragraphs[0].font.bold = True
+    tf.paragraphs[0].font.color.rgb = accent_rgb
+    sub = slide.shapes.add_textbox(Inches(0.8), Inches(4.0), Inches(11.7), Inches(0.8))
+    sub.text_frame.text = f"Generado el {datetime.now():%d/%m/%Y %H:%M}"
+
+    for sec in sections:
+        slide = prs.slides.add_slide(blank)
+        add_heading(slide, sec["heading"])
+        y_cursor = add_text_block(slide, sec.get("text"), 1.2)
+
+        if sec.get("image_bytes"):
+            # Se fija solo la altura (no el ancho) para que la imagen
+            # siempre quepa en el espacio restante de la diapositiva sin
+            # superponerse al texto de arriba, usando la mayor parte de
+            # la diapositiva ya que tiene toda la lámina para ella sola.
+            available_height = max(2.0, 7.5 - y_cursor - 0.3)
+            slide.shapes.add_picture(
+                io.BytesIO(sec["image_bytes"]), Inches(0.7), Inches(y_cursor),
+                height=Inches(min(5.8, available_height)),
+            )
+
+        if sec.get("table_data"):
+            if sec.get("image_bytes"):
+                # El gráfico ya ocupó esta diapositiva: la tabla pasa a
+                # una nueva, cada elemento en su propia lámina.
+                slide = prs.slides.add_slide(blank)
+                add_heading(slide, f"{sec['heading']} — tabla")
+                y_cursor = 1.2
+            add_table(slide, sec["table_data"], y_cursor)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+with tab_report:
+    st.markdown("#### Reporte ejecutivo descargable")
+    st.caption(
+        "Arma un reporte con las secciones que elijas y descárgalo en PDF "
+        "(A4) o PowerPoint, listo para compartir o presentar."
+    )
+
+    if not (_GIF_EXPORT_AVAILABLE and (_PDF_EXPORT_AVAILABLE or _PPTX_EXPORT_AVAILABLE)):
+        st.warning(
+            "La generación de reportes requiere las librerías matplotlib, "
+            "reportlab y python-pptx, que no están disponibles en este "
+            "entorno. Instálalas con `pip install -r requirements.txt` y "
+            "reinicia la app."
+        )
+    else:
+        extra_sites_to_plot_report = [s for s in extra_sites if s != site]
+
+        st.markdown("##### Elige qué incluir")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            inc_kpis = st.checkbox("Portada con resumen (KPIs)", value=True, key="inc_kpis")
+            inc_main_chart = st.checkbox(
+                f"Gráfico principal — {site}", value=True, key="inc_main_chart"
+            )
+            inc_extra_charts = st.checkbox(
+                "Gráficos adicionales de otras localizaciones",
+                value=bool(show_extra_sites and extra_sites_to_plot_report),
+                disabled=not (show_extra_sites and extra_sites_to_plot_report),
+                key="inc_extra_charts",
+            )
+            inc_stats = st.checkbox(
+                "Análisis estadístico (tendencia, quiebre, Mann-Kendall, evento)",
+                value=any([show_breakpoint, show_mk, show_arbitrary_break]),
+                key="inc_stats",
+            )
+        with rc2:
+            inc_ranking = st.checkbox(
+                f"Ranking por año — {rank_dept}, {rank_year}", value=True, key="inc_ranking"
+            )
+            inc_projection = st.checkbox(
+                "Proyección de casos",
+                value=bool(show_projection and proj_target),
+                disabled=not (show_projection and proj_target),
+                key="inc_projection",
+            )
+            inc_table = st.checkbox(
+                "Tabla de datos (departamento × año)", value=False, key="inc_table"
+            )
+
+        report_title = st.text_input(
+            "Título del reporte", value=f"Cáncer en el Tiempo — {site}", key="report_title"
+        )
+
+        gen_col1, gen_col2 = st.columns(2)
+        with gen_col1:
+            gen_pdf = st.button(
+                "📄 Generar PDF (A4)", key="gen_pdf",
+                disabled=not _PDF_EXPORT_AVAILABLE, use_container_width=True,
+            )
+        with gen_col2:
+            gen_pptx = st.button(
+                "📊 Generar PPTX", key="gen_pptx",
+                disabled=not _PPTX_EXPORT_AVAILABLE, use_container_width=True,
+            )
+
+        if gen_pdf or gen_pptx:
+            if not any([inc_kpis, inc_main_chart, inc_extra_charts, inc_ranking, inc_projection, inc_table]):
+                st.warning("Selecciona al menos una sección para incluir en el reporte.")
+            else:
+                with st.spinner("Generando reporte..."):
+                    sections = build_report_sections(
+                        inc_kpis, inc_main_chart, inc_extra_charts, inc_stats,
+                        inc_ranking, inc_projection, inc_table,
+                    )
+                if not sections:
+                    st.warning("No hay datos suficientes para generar el reporte con la selección actual.")
+                else:
+                    if gen_pdf:
+                        pdf_bytes = build_pdf_report(sections, report_title)
+                        st.download_button(
+                            "⬇️ Descargar PDF", data=pdf_bytes,
+                            file_name=f"{report_title.replace(' ', '_')}.pdf",
+                            mime="application/pdf", key="dl_pdf",
+                        )
+                    if gen_pptx:
+                        pptx_bytes = build_pptx_report(sections, report_title)
+                        st.download_button(
+                            "⬇️ Descargar PPTX", data=pptx_bytes,
+                            file_name=f"{report_title.replace(' ', '_')}.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            key="dl_pptx",
+                        )
 
 # ---------------------------------------------------------------------------
 # Autoría
