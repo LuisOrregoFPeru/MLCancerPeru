@@ -40,6 +40,7 @@ from stats_analysis import (
     linear_trend,
     mann_kendall_trend,
     project_series,
+    significance_label,
     smooth_series,
 )
 
@@ -56,39 +57,6 @@ try:
     _GIF_EXPORT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _GIF_EXPORT_AVAILABLE = False
-
-# Generación del Reporte Ejecutivo (PDF / PPTX): dependencias opcionales,
-# puras en Python (sin binarios de sistema como Chrome/LibreOffice) para
-# no repetir problemas de despliegue en Streamlit Cloud.
-from datetime import datetime
-
-try:
-    from reportlab.lib import colors as rl_colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import cm
-    from reportlab.platypus import (
-        Image as RLImage,
-        PageBreak,
-        Paragraph,
-        SimpleDocTemplate,
-        Spacer,
-        Table,
-        TableStyle,
-    )
-
-    _PDF_EXPORT_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    _PDF_EXPORT_AVAILABLE = False
-
-try:
-    from pptx import Presentation
-    from pptx.dml.color import RGBColor
-    from pptx.util import Inches, Pt
-
-    _PPTX_EXPORT_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    _PPTX_EXPORT_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Configuración general de la página
@@ -125,6 +93,26 @@ CUSTOM_CSS = f"""
         padding: 0.6rem 0.9rem;
     }}
     .source-note {{ font-size: 0.8rem; color: #666; margin-top: 0.4rem; }}
+    .citation-box {{
+        background: #f7f7fb;
+        border: 1px solid #e6e6ef;
+        border-radius: 10px;
+        padding: 1rem 1.3rem;
+        margin-top: 0.8rem;
+    }}
+    .citation-box h4 {{
+        color: {ACCENT_COLOR};
+        font-size: 0.8rem;
+        letter-spacing: 0.03em;
+        margin: 0.7rem 0 0.3rem 0;
+        text-transform: uppercase;
+    }}
+    .citation-box h4:first-child {{ margin-top: 0; }}
+    .citation-box p {{
+        font-size: 0.88rem;
+        color: #333;
+        margin: 0 0 0.4rem 0;
+    }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -362,6 +350,134 @@ with st.sidebar:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"No se pudo procesar el archivo: {exc}")
 
+    with st.expander("📊 Base de datos adicional (serie temporal)", expanded=False):
+        st.caption(
+            "Sube cualquier serie temporal adicional (CSV o Excel) con al menos "
+            "una columna de fecha/año y una columna numérica. Se analizará de "
+            "forma exploratoria en la pestaña «🔍 Exploración (base adicional)» "
+            "y se comparará con los casos de cáncer en «🔀 Análisis cruzado»."
+        )
+        _sec_upload = st.file_uploader(
+            "Archivo de serie adicional", type=["xlsx", "xls", "csv"], key="upload_sec"
+        )
+        if _sec_upload is not None:
+            try:
+                _is_csv = _sec_upload.name.lower().endswith(".csv")
+                if _is_csv:
+                    _sec_raw = pd.read_csv(_sec_upload)
+                else:
+                    _xls = pd.ExcelFile(_sec_upload)
+                    _sheet_names = _xls.sheet_names
+                    if len(_sheet_names) > 1:
+                        _sec_sheet = st.selectbox(
+                            "Hoja a utilizar", _sheet_names, key="sec_sheet",
+                            help="El archivo tiene varias hojas — elige cuál contiene la serie temporal.",
+                        )
+                    else:
+                        _sec_sheet = _sheet_names[0]
+                        st.caption(f"Hoja: **{_sec_sheet}**")
+                    _sec_raw = _xls.parse(_sec_sheet)
+                _sec_cols = _sec_raw.columns.tolist()
+                st.caption(f"Columnas detectadas: {', '.join(str(c) for c in _sec_cols)}")
+                _sec_date_col = st.selectbox("Columna de fecha o año", _sec_cols, key="sec_date_col")
+                _num_cols = [c for c in _sec_cols if c != _sec_date_col]
+                _sec_val_cols = st.multiselect(
+                    "Columna(s) de valor (numérico)",
+                    _num_cols,
+                    default=[_num_cols[0]] if _num_cols else [],
+                    key="sec_val_cols",
+                    help="Selecciona una o más columnas. Si eliges varias, puedes combinarlas o mantenerlas por separado.",
+                )
+                _sec_label = st.text_input("Etiqueta para esta serie", "Serie adicional", key="sec_label")
+                _sec_units = st.text_input(
+                    "Unidades del eje Y", "Valor", key="sec_units",
+                    help="Ej: 'Soles (S/)', 'Población', 'Presupuesto (S/ mill.)'",
+                )
+                _multi_cols = len(_sec_val_cols) > 1
+                if _multi_cols:
+                    _sec_combine = st.checkbox(
+                        "Combinar columnas en una sola serie",
+                        value=False, key="sec_combine",
+                        help="Si está marcado, las columnas se suman o promedian fila a fila. Sin marcar, cada columna conserva su propia serie.",
+                    )
+                else:
+                    _sec_combine = True
+                if _sec_combine:
+                    _sec_agg = st.radio(
+                        "Agregar por", ["Suma", "Promedio"], horizontal=True, key="sec_agg",
+                    )
+                else:
+                    _sec_agg = "Suma"
+                if not _sec_val_cols:
+                    st.warning("Selecciona al menos una columna de valor.")
+                elif st.button("Cargar serie adicional", key="btn_load_sec"):
+                    try:
+                        _sdf = _sec_raw[[_sec_date_col] + _sec_val_cols].copy()
+                        _sdf = _sdf.rename(columns={_sec_date_col: "tiempo"})
+                        if not _sec_combine or len(_sec_val_cols) == 1:
+                            _sdf["valor"] = pd.to_numeric(_sdf[_sec_val_cols[0]], errors="coerce")
+                        else:
+                            _num_df = _sdf[_sec_val_cols].apply(pd.to_numeric, errors="coerce")
+                            _sdf["valor"] = _num_df.sum(axis=1) if _sec_agg == "Suma" else _num_df.mean(axis=1)
+                        _sdf = _sdf[["tiempo", "valor"]]
+                        # Detectar si la columna de fecha son solo años (enteros 1900-2100)
+                        _as_num = pd.to_numeric(_sdf["tiempo"], errors="coerce")
+                        _is_year_col = _as_num.notna().all() and _as_num.between(1900, 2100).all()
+                        if _is_year_col:
+                            _sdf["Anio"] = _as_num.astype(int)
+                        else:
+                            _parsed = pd.to_datetime(_sdf["tiempo"], dayfirst=True, errors="coerce")
+                            _sdf["Anio"] = _parsed.dt.year
+                        _sdf = _sdf.dropna(subset=["Anio"])
+                        _sdf["Anio"] = _sdf["Anio"].astype(int)
+                        _agg_fn = "sum" if _sec_agg == "Suma" else "mean"
+                        # La serie principal de este dashboard es ANUAL: si la
+                        # fuente adicional viene con más de una fila por año
+                        # (ej. datos mensuales), se agrega a nivel de año.
+                        _s = _sdf.groupby("Anio")["valor"].agg(_agg_fn)
+                        _s = _s[_s.index.notna()]
+                        if _s.empty:
+                            st.error(
+                                "No se encontraron años válidos en la columna "
+                                "seleccionada. Verifica el formato (ej. 2021, "
+                                "2021-01-01, 01/01/2021, enero 2021)."
+                            )
+                        else:
+                            _sec_cols_dict: dict[str, pd.Series] = {}
+                            _raw_num = _sec_raw[[_sec_date_col] + _sec_val_cols].copy()
+                            _raw_num = _raw_num.rename(columns={_sec_date_col: "tiempo"})
+                            _raw_num["Anio"] = _sdf["Anio"].reindex(_raw_num.index)
+                            for _col in _sec_val_cols:
+                                _cv = pd.to_numeric(_raw_num[_col], errors="coerce")
+                                _raw_num["_v"] = _cv
+                                _sc = _raw_num.dropna(subset=["Anio"]).groupby("Anio")["_v"].agg(_agg_fn)
+                                _sec_cols_dict[_col] = _sc
+                            st.session_state["secondary_serie"] = _s
+                            st.session_state["secondary_label"] = _sec_label
+                            st.session_state["secondary_units"] = _sec_units
+                            st.session_state["secondary_cols_dict"] = _sec_cols_dict
+                            st.session_state["secondary_val_cols"] = list(_sec_val_cols)
+                            st.success(
+                                f"✓ Serie cargada: {len(_s)} año(s) "
+                                f"({int(_s.index.min())} a {int(_s.index.max())})"
+                            )
+                    except Exception as _e:  # noqa: BLE001
+                        st.error(f"Error al procesar el archivo: {_e}")
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"No se pudo leer el archivo: {_e}")
+
+        if "secondary_serie" in st.session_state:
+            _lbl = st.session_state.get("secondary_label", "Serie adicional")
+            _ss = st.session_state["secondary_serie"]
+            st.info(f"**'{_lbl}'** cargada — {len(_ss)} año(s) ({int(_ss.index.min())} a {int(_ss.index.max())})")
+            if st.button("🗑️ Quitar serie adicional", key="btn_rm_sec"):
+                for _k in [
+                    "secondary_serie", "secondary_label", "secondary_units",
+                    "secondary_cols_dict", "secondary_val_cols",
+                ]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
+
     st.subheader("Localización del tumor primario")
     site = st.selectbox(
         "Selecciona una localización del tumor primario",
@@ -415,6 +531,27 @@ with st.sidebar:
                 "Mann-Kendall, quiebres y proyección cuando el departamento "
                 "analizado es Perú."
             ),
+        )
+
+    show_dept_split = st.checkbox(
+        "Comparar varios departamentos (gráficos adicionales)",
+        value=False,
+        help=(
+            "Para la localización principal elegida arriba, muestra un "
+            "gráfico independiente por cada departamento que elijas abajo "
+            "(en vez de mezclarlos como líneas en un solo gráfico) — útil "
+            "cuando un departamento grande como Lima o Perú aplasta "
+            "visualmente a uno más pequeño en la escala combinada."
+        ),
+    )
+    dept_split_list: list[str] = []
+    if show_dept_split:
+        dept_split_list = st.multiselect(
+            "Departamentos adicionales a mostrar",
+            options=depts_available,
+            default=[],
+            max_selections=6,
+            key="dept_split_list",
         )
 
     st.subheader("Periodo")
@@ -744,11 +881,12 @@ else:
 
 (
     tab_graph, tab_table, tab_ranking, tab_ranking_anim, tab_projection,
-    tab_downloads, tab_report,
+    tab_downloads, tab_explore_sec, tab_cross,
 ) = st.tabs(
     [
         "📈 Gráfico", "📋 Tabla", "🏆 Ranking por año", "🎬 Ranking animado",
-        "🔮 Proyección", "⬇️ Descargas", "📑 Reporte ejecutivo",
+        "🔮 Proyección", "⬇️ Descargas",
+        "🔍 Exploración (base adicional)", "🔀 Análisis cruzado",
     ]
 )
 
@@ -758,25 +896,32 @@ def render_site_analysis_chart(
     filtered_local: pd.DataFrame,
     compact: bool = False,
     key_suffix: str = "",
+    depts_override: list[str] | None = None,
 ) -> None:
     """Construye y renderiza el gráfico de una localización del tumor
     primario, con línea de tendencia, suavizado LOWESS, quiebre
     automático, Mann-Kendall y quiebre por evento —  todo según los
     controles del panel lateral. La usan tanto el gráfico principal
-    como los gráficos adicionales de otras localizaciones, así todos
-    comparten exactamente el mismo análisis estadístico y la misma
-    personalización de colores.
+    como los gráficos adicionales de otras localizaciones y de otros
+    departamentos, así todos comparten exactamente el mismo análisis
+    estadístico y la misma personalización de colores.
 
     `compact=True` reduce tamaños de fuente/altura y agrupa los
     resultados estadísticos en un expander, para el layout en columnas
     de los gráficos adicionales.
+
+    `depts_override`, si se especifica, reemplaza la lista global de
+    departamentos seleccionados (usado para el modo "un gráfico por
+    departamento" — cada llamada solo dibuja un departamento a la vez).
     """
+    depts_to_plot = depts_override if depts_override is not None else depts_selected
+
     if filtered_local.empty or filtered_local["Casos"].dropna().empty:
         st.info(f"No hay datos para **{site_val}** con la selección actual.")
         return
 
     fig = go.Figure()
-    for i, dept in enumerate(depts_selected):
+    for i, dept in enumerate(depts_to_plot):
         sub = filtered_local[filtered_local["Departamento"] == dept]
         color = (
             color_overrides.get(dept, DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)])
@@ -866,12 +1011,22 @@ def render_site_analysis_chart(
                 )
 
     bp_summary = None
-    if show_breakpoint and breakpoint_target:
-        sub_bp = filtered_local[filtered_local["Departamento"] == breakpoint_target]
+    bp_dept = None
+    if show_breakpoint:
+        if breakpoint_target and breakpoint_target in depts_to_plot:
+            bp_dept = breakpoint_target
+        elif len(depts_to_plot) == 1:
+            # Un solo departamento en este gráfico: se usa como objetivo
+            # del análisis automáticamente, sin depender de que coincida
+            # con el selector de la barra lateral (así el análisis
+            # también aplica a los gráficos adicionales por departamento).
+            bp_dept = depts_to_plot[0]
+    if bp_dept:
+        sub_bp = filtered_local[filtered_local["Departamento"] == bp_dept]
         bp = detect_breakpoint(sub_bp["Anio"].to_numpy(), sub_bp["Casos"].to_numpy())
         if bp is None:
             st.info(
-                f"No hay suficientes años con datos en **{breakpoint_target}** "
+                f"No hay suficientes años con datos en **{bp_dept}** "
                 f"({site_val}) para estimar un punto de quiebre (se requieren al menos 6)."
             )
         else:
@@ -896,12 +1051,18 @@ def render_site_analysis_chart(
             )
 
     mk_summary = None
-    if show_mk and mk_target:
-        sub_mk = dept_casos_series(mk_target, site_val, mk_year_range[0], mk_year_range[1])
+    mk_dept = None
+    if show_mk:
+        if mk_target and mk_target in depts_to_plot:
+            mk_dept = mk_target
+        elif len(depts_to_plot) == 1:
+            mk_dept = depts_to_plot[0]
+    if mk_dept:
+        sub_mk = dept_casos_series(mk_dept, site_val, mk_year_range[0], mk_year_range[1])
         mkr = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
         if mkr is None:
             st.info(
-                f"No hay suficientes años con datos en **{mk_target}** ({site_val}) "
+                f"No hay suficientes años con datos en **{mk_dept}** ({site_val}) "
                 f"entre {mk_year_range[0]} y {mk_year_range[1]} para el test de "
                 "Mann-Kendall (se requieren al menos 6)."
             )
@@ -911,13 +1072,19 @@ def render_site_analysis_chart(
                 go.Scatter(
                     x=mkr.x, y=mkr.y_sen, mode="lines",
                     line=dict(width=2, color="#0f9b8e", dash="dashdot"),
-                    name=f"Pendiente de Sen · {mk_target}", hoverinfo="skip",
+                    name=f"Pendiente de Sen · {mk_dept}", hoverinfo="skip",
                 )
             )
 
     arb_summary = None
-    if show_arbitrary_break and arb_target and arb_break_year is not None:
-        sub_arb = filtered_local[filtered_local["Departamento"] == arb_target]
+    arb_dept = None
+    if show_arbitrary_break and arb_break_year is not None:
+        if arb_target and arb_target in depts_to_plot:
+            arb_dept = arb_target
+        elif len(depts_to_plot) == 1:
+            arb_dept = depts_to_plot[0]
+    if arb_dept:
+        sub_arb = filtered_local[filtered_local["Departamento"] == arb_dept]
         arb = chow_test_arbitrary_break(
             sub_arb["Anio"].to_numpy(),
             sub_arb["Casos"].to_numpy(),
@@ -928,7 +1095,7 @@ def render_site_analysis_chart(
             st.info(
                 f"No hay suficientes años antes/después de {int(arb_break_year)} "
                 f"(considerando {int(arb_lag)} año(s) de implementación) en "
-                f"**{arb_target}** ({site_val}) para aplicar el test (se requieren al "
+                f"**{arb_dept}** ({site_val}) para aplicar el test (se requieren al "
                 "menos 3 años a cada lado)."
             )
         else:
@@ -957,8 +1124,18 @@ def render_site_analysis_chart(
                     fillcolor="#e07a2c", opacity=0.10, line_width=0,
                 )
 
+    # Cuando el gráfico muestra un único departamento (ya sea porque solo
+    # hay uno seleccionado en el panel lateral, o por el modo "Comparar
+    # departamentos por separado"), se incluye su nombre en el título —
+    # la leyenda de Plotly solo aparece con 2+ líneas, así que sin esto
+    # un gráfico de un solo departamento no indica cuál es en ningún lado.
+    if len(depts_to_plot) == 1:
+        chart_title = f"Casos de cáncer — {site_val} · {depts_to_plot[0]}"
+    else:
+        chart_title = f"Casos de cáncer — {site_val}"
+
     fig.update_layout(
-        title=f"Casos de cáncer — {site_val}",
+        title=chart_title,
         xaxis_title="Año",
         yaxis_title="N° de casos nuevos",
         yaxis_type="log" if log_scale else "linear",
@@ -980,7 +1157,7 @@ def render_site_analysis_chart(
     )
     st.plotly_chart(fig, use_container_width=True, key=f"site_chart_{key_suffix}")
 
-    if PERU_LABEL in depts_selected and peru_exclude:
+    if PERU_LABEL in depts_to_plot and peru_exclude:
         st.caption(
             f"ℹ️ El total de **{PERU_LABEL}** mostrado excluye: "
             f"{', '.join(peru_exclude)} (configurado en el panel lateral)."
@@ -994,7 +1171,7 @@ def render_site_analysis_chart(
             else "no alcanza significancia estadística"
         )
         summary_blocks.append(
-            f"**📐 Punto de quiebre estimado para {breakpoint_target} ({site_val}): "
+            f"**📐 Punto de quiebre estimado para {bp_dept} ({site_val}): "
             f"año {bp_summary.year}** — el cambio de tendencia es {sig_txt} "
             f"(test de Chow: F = {bp_summary.f_stat:.2f}, p = {bp_summary.p_value:.4f}). "
             f"Pendiente antes: {bp_summary.slope_before:+.1f} casos/año · "
@@ -1012,7 +1189,7 @@ def render_site_analysis_chart(
             else "no alcanza significancia estadística (α=0.05)"
         )
         summary_blocks.append(
-            f"**🧪 Mann-Kendall para {mk_target} ({site_val}, "
+            f"**🧪 Mann-Kendall para {mk_dept} ({site_val}, "
             f"{mk_year_range[0]}–{mk_year_range[1]}): tendencia {trend_es}** — {sig_txt} "
             f"(z = {mk_summary.z_stat:.2f}, p = {mk_summary.p_value:.4f}, "
             f"τ de Kendall = {mk_summary.tau:.2f}). "
@@ -1033,7 +1210,7 @@ def render_site_analysis_chart(
             else ""
         )
         summary_blocks.append(
-            f"**🏛️ Quiebre por evento en {arb_target} ({site_val}): "
+            f"**🏛️ Quiebre por evento en {arb_dept} ({site_val}): "
             f"año {arb_summary.break_year}**{lag_txt} — el cambio de tendencia es "
             f"{sig_txt} (test de Chow: F = {arb_summary.f_stat:.2f}, "
             f"p = {arb_summary.p_value:.4f}). "
@@ -1096,6 +1273,35 @@ with tab_graph:
                         extra_site, extra_filtered, compact=True,
                         key_suffix=f"extra_{extra_site}",
                     )
+
+    # -----------------------------------------------------------------
+    # Gráficos adicionales: comparar simultáneamente varios departamentos,
+    # cada uno en su propio gráfico (en vez de mezclados como líneas en
+    # el gráfico principal), para la misma localización elegida arriba.
+    # -----------------------------------------------------------------
+    if show_dept_split and dept_split_list:
+        st.markdown("---")
+        st.markdown("#### Comparar departamentos por separado")
+        for row_start in range(0, len(dept_split_list), 2):
+            row_depts = dept_split_list[row_start : row_start + 2]
+            cols = st.columns(len(row_depts))
+            for col, one_dept in zip(cols, row_depts):
+                with col:
+                    dept_series = dept_casos_series(
+                        one_dept, site, year_range[0], year_range[1]
+                    ).copy()
+                    dept_series["Departamento"] = one_dept
+                    render_site_analysis_chart(
+                        site, dept_series, compact=True,
+                        key_suffix=f"dept_{one_dept}",
+                        depts_override=[one_dept],
+                    )
+    elif show_dept_split and not dept_split_list:
+        st.info(
+            "Selecciona uno o más departamentos en **'Departamentos "
+            "adicionales a mostrar'** (panel lateral) para ver esta comparación."
+        )
+
 with tab_table:
     pivot = filtered.pivot_table(
         index="Departamento", columns="Anio", values="Casos", aggfunc="sum"
@@ -1686,533 +1892,502 @@ with tab_downloads:
     )
 
 # ---------------------------------------------------------------------------
-# Reporte ejecutivo (PDF / PPTX)
+# Exploración (base adicional) y Análisis cruzado
 # ---------------------------------------------------------------------------
+# Adaptados del dashboard hermano "Observatorio del Financiamiento
+# Oncológico INEN" a la granularidad ANUAL de este proyecto (aquí no hay
+# concepto de "normas"/puntos de corte regulatorios, así que esa parte del
+# dashboard hermano no aplica; en su lugar se reutilizan las mismas
+# herramientas estadísticas ya presentes en este dashboard — tendencia
+# lineal, quiebre automático, Mann-Kendall, LOWESS).
 
+OK_COLOR = "#3ba776"
+WARN_COLOR = "#c9a13b"
+BAD_COLOR = "#c94141"
 
-def _mpl_timeseries_chart(filtered_local: pd.DataFrame, depts: list[str], title: str) -> bytes:
-    """Versión estática (matplotlib) del gráfico de casos por año y
-    departamento, para incrustar en el reporte descargable."""
-    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=140)
-    for i, dept in enumerate(depts):
-        sub = filtered_local[filtered_local["Departamento"] == dept].sort_values("Anio")
-        if sub["Casos"].dropna().empty:
-            continue
-        color = (
-            color_overrides.get(dept, DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)])
-            if custom_colors
-            else DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)]
-        )
-        ax.plot(
-            sub["Anio"], sub["Casos"], marker="o", markersize=3, linewidth=2,
-            label=dept, color=color,
-        )
-    ax.set_title(title, fontsize=13, fontweight="bold", loc="left")
-    ax.set_xlabel("Año")
-    ax.set_ylabel("N° de casos nuevos")
-    ax.legend(fontsize=8, loc="upper left", ncol=min(len(depts), 3))
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+with tab_explore_sec:
+    st.markdown("#### Exploración de la base de datos adicional")
 
-
-def _mpl_rank_chart(rank_data_local: pd.DataFrame, title: str, base_color: str = PRIMARY_COLOR) -> bytes:
-    """Versión estática (matplotlib) del ranking de localizaciones, para
-    incrustar en el reporte descargable."""
-    n = len(rank_data_local)
-    colors = shades_of(base_color, n)
-    fig, ax = plt.subplots(figsize=(9, max(3, 0.4 * n) + 1), dpi=140)
-    ax.barh(range(n), rank_data_local["Casos"], color=colors)
-    ax.set_yticks(range(n))
-    ax.set_yticklabels(
-        [f"{r}° {name}" for r, name in enumerate(rank_data_local["Localizacion"], start=1)],
-        fontsize=9,
-    )
-    max_val = rank_data_local["Casos"].max()
-    for i, val in enumerate(rank_data_local["Casos"]):
-        ax.text(val + max_val * 0.01, i, f"{val:,.0f}", va="center", fontsize=8)
-    ax.set_title(title, fontsize=13, fontweight="bold", loc="left")
-    ax.set_xlabel("N° de casos nuevos")
-    ax.invert_yaxis()
-    ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def _mpl_projection_chart(proj, title: str) -> bytes:
-    """Versión estática (matplotlib) del gráfico de proyección, para
-    incrustar en el reporte descargable."""
-    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=140)
-    ax.plot(
-        proj.years_hist, proj.values_hist, marker="o", markersize=3,
-        linewidth=2, color=ACCENT_COLOR, label="Histórico",
-    )
-    ax.fill_between(
-        proj.years_future, proj.recommended_lower, proj.recommended_upper,
-        color=SECONDARY_COLOR, alpha=0.15, label="Banda 90%",
-    )
-    ax.plot(
-        proj.years_future, proj.recommended, marker="o", markersize=3,
-        linewidth=2, color=SECONDARY_COLOR, label="Recomendado",
-    )
-    ax.plot(
-        proj.years_future, proj.conservative, linestyle=":", linewidth=1.6,
-        color="#7d7d7d", label="Conservador",
-    )
-    ax.plot(
-        proj.years_future, proj.optimistic, linestyle="--", linewidth=1.6,
-        color="#c94141", label="Lineal (Sen)",
-    )
-    ax.set_title(title, fontsize=13, fontweight="bold", loc="left")
-    ax.set_xlabel("Año")
-    ax.set_ylabel("N° de casos (proyectado)")
-    ax.legend(fontsize=8, loc="upper left")
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def compute_site_summaries(site_val: str, filtered_local: pd.DataFrame) -> dict:
-    """Calcula (sin renderizar nada en pantalla) los resúmenes
-    estadísticos de una localización — tendencia/quiebre/Mann-Kendall/
-    evento — según los controles del panel lateral, para el reporte."""
-    bp_summary = None
-    if show_breakpoint and breakpoint_target:
-        sub_bp = filtered_local[filtered_local["Departamento"] == breakpoint_target]
-        bp_summary = detect_breakpoint(sub_bp["Anio"].to_numpy(), sub_bp["Casos"].to_numpy())
-
-    mk_summary = None
-    if show_mk and mk_target:
-        sub_mk = dept_casos_series(mk_target, site_val, mk_year_range[0], mk_year_range[1])
-        mk_summary = mann_kendall_trend(sub_mk["Anio"].to_numpy(), sub_mk["Casos"].to_numpy())
-
-    arb_summary = None
-    if show_arbitrary_break and arb_target and arb_break_year is not None:
-        sub_arb = filtered_local[filtered_local["Departamento"] == arb_target]
-        arb_summary = chow_test_arbitrary_break(
-            sub_arb["Anio"].to_numpy(), sub_arb["Casos"].to_numpy(),
-            break_year=int(arb_break_year), implementation_lag=int(arb_lag),
-        )
-    return {"bp": bp_summary, "mk": mk_summary, "arb": arb_summary}
-
-
-def format_summary_lines(site_val: str, summaries: dict) -> list[str]:
-    """Texto plano de los resúmenes estadísticos, para el reporte."""
-    lines = []
-    bp = summaries.get("bp")
-    if bp is not None:
-        sig = "estadísticamente significativo" if bp.significant else "no alcanza significancia estadística"
-        lines.append(
-            f"Quiebre estimado para {breakpoint_target} ({site_val}): año {bp.year} — {sig} "
-            f"(test de Chow: F={bp.f_stat:.2f}, p={bp.p_value:.4f}). "
-            f"Pendiente antes: {bp.slope_before:+.1f} casos/año, después: {bp.slope_after:+.1f} casos/año."
-        )
-    mk = summaries.get("mk")
-    if mk is not None:
-        trend_es = {
-            "increasing": "creciente", "decreasing": "decreciente", "no trend": "sin tendencia clara",
-        }.get(mk.trend, mk.trend)
-        sig = "significativa" if mk.significant else "no significativa"
-        lines.append(
-            f"Mann-Kendall para {mk_target} ({site_val}, {mk_year_range[0]}–{mk_year_range[1]}): "
-            f"tendencia {trend_es} — {sig} (p={mk.p_value:.4f}). "
-            f"Pendiente de Sen: {mk.sen_slope:+.1f} casos/año."
-        )
-    arb = summaries.get("arb")
-    if arb is not None:
-        sig = "estadísticamente significativo" if arb.significant else "no alcanza significancia estadística"
-        lines.append(
-            f"Quiebre por evento en {arb_target} ({site_val}): año {arb.break_year} — {sig} "
-            f"(test de Chow: F={arb.f_stat:.2f}, p={arb.p_value:.4f})."
-        )
-    return lines
-
-
-def build_report_sections(
-    inc_kpis: bool, inc_main_chart: bool, inc_extra_charts: bool, inc_stats: bool,
-    inc_ranking: bool, inc_projection: bool, inc_table: bool,
-) -> list[dict]:
-    """Arma la lista de secciones del reporte (cada una con encabezado,
-    texto, imagen y/o tabla) a partir de las casillas elegidas por el
-    usuario, reutilizando exactamente los mismos datos y ajustes
-    (localización, departamentos, exclusiones, análisis, proyección)
-    configurados en el resto del dashboard."""
-    sections: list[dict] = []
-
-    if inc_kpis:
-        kpi_lines = [
-            f"Localización del tumor primario: {site}",
-            f"Departamento(s) de residencia: {format_region_list(depts_selected, max_show=10)}",
-            f"Variación {year_a} → {year_b}: " + (f"{delta_pct:+.1f}%" if pd.notna(delta_pct) else "s/d"),
-            "Cambio absoluto: " + (f"{delta_abs:+,.0f} casos" if pd.notna(delta_abs) else "s/d"),
-            "CAGR (crecimiento anual compuesto): " + (f"{cagr * 100:+.1f}%/año" if pd.notna(cagr) else "s/d"),
-            "Año pico: " + (f"{peak_year} · {peak_val:,.0f} casos" if peak_year is not None else "s/d"),
-        ]
-        if mk_kpi is not None:
-            trend_word = {
-                "increasing": "Creciente", "decreasing": "Decreciente", "no trend": "Sin tendencia clara",
-            }.get(mk_kpi.trend, mk_kpi.trend)
-            kpi_lines.append(f"Tendencia general (Mann-Kendall): {trend_word} (p={mk_kpi.p_value:.3f})")
-        if PERU_LABEL in depts_selected and peru_exclude:
-            kpi_lines.append(f"El total de {PERU_LABEL} excluye: {', '.join(peru_exclude)}.")
-        sections.append({"heading": "Resumen ejecutivo", "text": kpi_lines})
-
-    if inc_main_chart:
-        img = _mpl_timeseries_chart(filtered, depts_selected, f"Casos de cáncer — {site}")
-        sec = {"heading": f"Gráfico — {site}", "image_bytes": img}
-        if inc_stats:
-            lines = format_summary_lines(site, compute_site_summaries(site, filtered))
-            if lines:
-                sec["text"] = lines
-        sections.append(sec)
-
-    if inc_extra_charts and show_extra_sites:
-        for extra_site in [s for s in extra_sites if s != site]:
-            extra_frames = []
-            for dept in depts_selected:
-                sub_extra = dept_casos_series(dept, extra_site, year_range[0], year_range[1]).copy()
-                sub_extra["Departamento"] = dept
-                extra_frames.append(sub_extra)
-            extra_filtered = (
-                pd.concat(extra_frames, ignore_index=True) if extra_frames else pd.DataFrame()
-            )
-            if extra_filtered.empty or extra_filtered["Casos"].dropna().empty:
-                continue
-            img = _mpl_timeseries_chart(extra_filtered, depts_selected, f"Casos de cáncer — {extra_site}")
-            sec = {"heading": f"Gráfico — {extra_site}", "image_bytes": img}
-            if inc_stats:
-                lines = format_summary_lines(extra_site, compute_site_summaries(extra_site, extra_filtered))
-                if lines:
-                    sec["text"] = lines
-            sections.append(sec)
-
-    if inc_ranking:
-        rank_data_report = get_year_ranking(rank_dept, rank_year, exclude=rank_exclude, top_n=rank_top_n)
-        if not rank_data_report.empty:
-            base_color = color_overrides.get(rank_dept, PRIMARY_COLOR) if custom_colors else PRIMARY_COLOR
-            img = _mpl_rank_chart(
-                rank_data_report, f"Ranking de cánceres — {rank_dept}, {rank_year}", base_color=base_color
-            )
-            table_data = [["Puesto", "Localización", "Casos"]] + [
-                [str(i + 1), row.Localizacion, f"{row.Casos:,.0f}"]
-                for i, row in enumerate(rank_data_report.itertuples())
-            ]
-            sections.append({
-                "heading": f"Ranking — {rank_dept}, {rank_year}",
-                "image_bytes": img,
-                "table_data": table_data,
-            })
-
-    if inc_projection and show_projection and proj_target:
-        sub_proj = dept_casos_series(proj_target, site, year_range[0], year_range[1])
-        proj = project_series(sub_proj["Anio"].to_numpy(), sub_proj["Casos"].to_numpy(), horizon=proj_horizon)
-        if proj is not None:
-            img = _mpl_projection_chart(proj, f"Proyección — {site} · {proj_target}")
-            table_data = [["Año", "Conservador", "Recomendado", "Banda 90%", "Lineal (Sen)"]] + [
-                [str(int(y)), f"{c:,.0f}", f"{r:,.0f}", f"{lo:,.0f}–{hi:,.0f}", f"{o:,.0f}"]
-                for y, c, r, lo, hi, o in zip(
-                    proj.years_future, proj.conservative, proj.recommended,
-                    proj.recommended_lower, proj.recommended_upper, proj.optimistic,
-                )
-            ]
-            sections.append({
-                "heading": f"Proyección — {site} · {proj_target}",
-                "image_bytes": img,
-                "table_data": table_data,
-                "text": [proj.method_note],
-            })
-
-    if inc_table:
-        # Se transpone (años como filas) para que la tabla quepa en el
-        # ancho de la página A4 y se pagine sola si hay muchos años —
-        # con años como columnas, una serie larga se corta al borde.
-        pivot_report = filtered.pivot_table(index="Departamento", columns="Anio", values="Casos", aggfunc="sum")
-        header = ["Año"] + list(pivot_report.index)
-        rows = [header]
-        for year_col in pivot_report.columns:
-            row_vals = [
-                f"{v:,.0f}" if pd.notna(v) else "—" for v in pivot_report[year_col]
-            ]
-            rows.append([str(int(year_col))] + row_vals)
-        sections.append({"heading": f"Tabla de datos — {site}", "table_data": rows})
-
-    return sections
-
-
-def build_pdf_report(sections: list[dict], report_title: str) -> bytes:
-    """Arma el PDF (A4) del reporte con reportlab (sin dependencias de
-    sistema como Chrome/LibreOffice). Cada gráfico o tabla ocupa su
-    propia página — si una sección tiene ambos (p. ej. Proyección), el
-    gráfico va en una página y la tabla en la siguiente."""
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
-        leftMargin=1.8 * cm, rightMargin=1.8 * cm,
-    )
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "TitleCustom", parent=styles["Title"], textColor=rl_colors.HexColor(ACCENT_COLOR),
-    )
-    h2_style = ParagraphStyle(
-        "H2Custom", parent=styles["Heading2"], textColor=rl_colors.HexColor(ACCENT_COLOR),
-        spaceBefore=14,
-    )
-    body_style = styles["BodyText"]
-
-    story = [
-        Paragraph(report_title, title_style),
-        Paragraph(f"Generado el {datetime.now():%d/%m/%Y %H:%M}", styles["Normal"]),
-    ]
-
-    for sec in sections:
-        story.append(PageBreak())
-        story.append(Paragraph(sec["heading"], h2_style))
-        if sec.get("text"):
-            for line in sec["text"]:
-                story.append(Paragraph(line, body_style))
-            story.append(Spacer(1, 0.3 * cm))
-
-        if sec.get("image_bytes"):
-            # El gráfico usa la mayor parte de la página, ya que tiene
-            # toda la hoja para él solo.
-            story.append(RLImage(io.BytesIO(sec["image_bytes"]), width=17 * cm, height=9.6 * cm))
-
-        if sec.get("table_data"):
-            if sec.get("image_bytes"):
-                # El gráfico ya ocupó esta página: la tabla pasa a la
-                # siguiente, cada elemento en su propia hoja.
-                story.append(PageBreak())
-                story.append(Paragraph(f"{sec['heading']} — tabla", h2_style))
-            t = Table(sec["table_data"], hAlign="LEFT", repeatRows=1)
-            t.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor(ACCENT_COLOR)),
-                ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
-                ("FONTSIZE", (0, 0), (-1, -1), 7),
-                ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.grey),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor("#f7f7fb")]),
-            ]))
-            story.append(t)
-
-    doc.build(story)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def build_pptx_report(sections: list[dict], report_title: str) -> bytes:
-    """Arma la presentación PPTX del reporte con python-pptx (sin
-    dependencias de sistema). Cada gráfico o tabla ocupa su propia
-    diapositiva — si una sección tiene ambos (p. ej. Proyección), el
-    gráfico va en una diapositiva y la tabla en la siguiente."""
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-    blank = prs.slide_layouts[6]
-    accent_rgb = RGBColor.from_string(ACCENT_COLOR.lstrip("#"))
-
-    def add_heading(slide, heading_text: str) -> None:
-        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.3), Inches(0.8))
-        title_box.text_frame.text = heading_text
-        title_box.text_frame.paragraphs[0].font.size = Pt(28)
-        title_box.text_frame.paragraphs[0].font.bold = True
-        title_box.text_frame.paragraphs[0].font.color.rgb = accent_rgb
-
-    def add_text_block(slide, lines: list[str] | None, y_cursor: float) -> float:
-        if not lines:
-            return y_cursor
-        body_box = slide.shapes.add_textbox(Inches(0.5), Inches(y_cursor), Inches(12.3), Inches(1.8))
-        tf = body_box.text_frame
-        tf.word_wrap = True
-        # Estima cuántas líneas ocupará cada párrafo al envolverse, para
-        # reservar el espacio real (una nota larga puede ocupar 3-4
-        # líneas) y que el gráfico de abajo no quede superpuesto.
-        chars_per_line = 128  # aprox. para Pt(14) en un ancho de 12.3"
-        total_lines = 0
-        for i, line in enumerate(lines):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.text = line
-            p.font.size = Pt(14)
-            total_lines += max(1, -(-len(line) // chars_per_line))  # ceil
-        return y_cursor + 0.30 + 0.27 * total_lines
-
-    def add_table(slide, table_data: list[list[str]], y_cursor: float) -> None:
-        # Las diapositivas no paginan: si la tabla es muy larga, se
-        # muestran solo las filas más recientes con una nota (el PDF sí
-        # incluye la tabla completa, paginada automáticamente).
-        max_rows_per_slide = 16
-        full_len = len(table_data)
-        if full_len > max_rows_per_slide:
-            header_row = table_data[0]
-            kept_rows = table_data[-(max_rows_per_slide - 1):]
-            table_data = [header_row] + kept_rows
-            note_box = slide.shapes.add_textbox(Inches(0.7), Inches(y_cursor), Inches(11.9), Inches(0.35))
-            note_box.text_frame.text = (
-                f"Mostrando los últimos {len(kept_rows)} registros de "
-                f"{full_len - 1} (tabla completa en la versión PDF)."
-            )
-            note_box.text_frame.paragraphs[0].font.size = Pt(11)
-            note_box.text_frame.paragraphs[0].font.italic = True
-            y_cursor += 0.4
-
-        rows = len(table_data)
-        cols = len(table_data[0])
-        table_shape = slide.shapes.add_table(
-            rows, cols, Inches(0.7), Inches(y_cursor), Inches(11.9), Inches(min(5.5, 0.35 * rows))
-        )
-        table = table_shape.table
-        for r, row_vals in enumerate(table_data):
-            for c, val in enumerate(row_vals):
-                cell = table.cell(r, c)
-                cell.text = str(val)
-                for para in cell.text_frame.paragraphs:
-                    para.font.size = Pt(10)
-
-    slide = prs.slides.add_slide(blank)
-    tx = slide.shapes.add_textbox(Inches(0.8), Inches(2.6), Inches(11.7), Inches(1.5))
-    tf = tx.text_frame
-    tf.text = report_title
-    tf.paragraphs[0].font.size = Pt(40)
-    tf.paragraphs[0].font.bold = True
-    tf.paragraphs[0].font.color.rgb = accent_rgb
-    sub = slide.shapes.add_textbox(Inches(0.8), Inches(4.0), Inches(11.7), Inches(0.8))
-    sub.text_frame.text = f"Generado el {datetime.now():%d/%m/%Y %H:%M}"
-
-    for sec in sections:
-        slide = prs.slides.add_slide(blank)
-        add_heading(slide, sec["heading"])
-        y_cursor = add_text_block(slide, sec.get("text"), 1.2)
-
-        if sec.get("image_bytes"):
-            # Se fija solo la altura (no el ancho) para que la imagen
-            # siempre quepa en el espacio restante de la diapositiva sin
-            # superponerse al texto de arriba, usando la mayor parte de
-            # la diapositiva ya que tiene toda la lámina para ella sola.
-            available_height = max(2.0, 7.5 - y_cursor - 0.3)
-            slide.shapes.add_picture(
-                io.BytesIO(sec["image_bytes"]), Inches(0.7), Inches(y_cursor),
-                height=Inches(min(5.8, available_height)),
-            )
-
-        if sec.get("table_data"):
-            if sec.get("image_bytes"):
-                # El gráfico ya ocupó esta diapositiva: la tabla pasa a
-                # una nueva, cada elemento en su propia lámina.
-                slide = prs.slides.add_slide(blank)
-                add_heading(slide, f"{sec['heading']} — tabla")
-                y_cursor = 1.2
-            add_table(slide, sec["table_data"], y_cursor)
-
-    buf = io.BytesIO()
-    prs.save(buf)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-with tab_report:
-    st.markdown("#### Reporte ejecutivo descargable")
-    st.caption(
-        "Arma un reporte con las secciones que elijas y descárgalo en PDF "
-        "(A4) o PowerPoint, listo para compartir o presentar."
-    )
-
-    if not (_GIF_EXPORT_AVAILABLE and (_PDF_EXPORT_AVAILABLE or _PPTX_EXPORT_AVAILABLE)):
-        st.warning(
-            "La generación de reportes requiere las librerías matplotlib, "
-            "reportlab y python-pptx, que no están disponibles en este "
-            "entorno. Instálalas con `pip install -r requirements.txt` y "
-            "reinicia la app."
+    if "secondary_serie" not in st.session_state:
+        st.info(
+            "Aún no se ha cargado ninguna base de datos adicional. "
+            "Usa el panel lateral → **📊 Base de datos adicional** para subir un archivo CSV o Excel."
         )
     else:
-        extra_sites_to_plot_report = [s for s in extra_sites if s != site]
+        _sec_s: pd.Series = st.session_state["secondary_serie"]
+        _sec_lbl: str = st.session_state.get("secondary_label", "Serie adicional")
+        _sec_units_lbl: str = st.session_state.get("secondary_units", "Valor")
+        _sec_cols_dict_kpi: dict = st.session_state.get("secondary_cols_dict", {})
+        _sec_val_cols_kpi: list = st.session_state.get("secondary_val_cols", [])
 
-        st.markdown("##### Elige qué incluir")
-        rc1, rc2 = st.columns(2)
-        with rc1:
-            inc_kpis = st.checkbox("Portada con resumen (KPIs)", value=True, key="inc_kpis")
-            inc_main_chart = st.checkbox(
-                f"Gráfico principal — {site}", value=True, key="inc_main_chart"
-            )
-            inc_extra_charts = st.checkbox(
-                "Gráficos adicionales de otras localizaciones",
-                value=bool(show_extra_sites and extra_sites_to_plot_report),
-                disabled=not (show_extra_sites and extra_sites_to_plot_report),
-                key="inc_extra_charts",
-            )
-            inc_stats = st.checkbox(
-                "Análisis estadístico (tendencia, quiebre, Mann-Kendall, evento)",
-                value=any([show_breakpoint, show_mk, show_arbitrary_break]),
-                key="inc_stats",
-            )
-        with rc2:
-            inc_ranking = st.checkbox(
-                f"Ranking por año — {rank_dept}, {rank_year}", value=True, key="inc_ranking"
-            )
-            inc_projection = st.checkbox(
-                "Proyección de casos",
-                value=bool(show_projection and proj_target),
-                disabled=not (show_projection and proj_target),
-                key="inc_projection",
-            )
-            inc_table = st.checkbox(
-                "Tabla de datos (departamento × año)", value=False, key="inc_table"
-            )
-
-        report_title = st.text_input(
-            "Título del reporte", value=f"Cáncer en el Tiempo — {site}", key="report_title"
+        st.caption(
+            f"**{_sec_lbl}** · {len(_sec_s)} año(s) · "
+            f"{int(_sec_s.index.min())} a {int(_sec_s.index.max())}"
         )
 
-        gen_col1, gen_col2 = st.columns(2)
-        with gen_col1:
-            gen_pdf = st.button(
-                "📄 Generar PDF (A4)", key="gen_pdf",
-                disabled=not _PDF_EXPORT_AVAILABLE, use_container_width=True,
+        def _cagr_sec(s: pd.Series) -> str:
+            _snn = s[s > 0].dropna()
+            if len(_snn) < 2:
+                return "s/d"
+            _n = _snn.index[-1] - _snn.index[0]
+            if _n <= 0 or _snn.iloc[0] <= 0:
+                return "s/d"
+            return f"{((_snn.iloc[-1] / _snn.iloc[0]) ** (1 / _n) - 1) * 100:+.1f}%/año"
+
+        def _render_kpi_row_sec(sf: pd.Series, label: str):
+            _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
+            _k1.metric(f"Total — {label}", f"{sf.sum():,.2f}")
+            _k2.metric("Promedio anual", f"{sf.mean():,.2f}")
+            _var = (
+                f"{(sf.iloc[-1] / sf.iloc[0] - 1) * 100:+.1f}%"
+                if len(sf) >= 2 and sf.iloc[0] != 0 else "s/d"
             )
-        with gen_col2:
-            gen_pptx = st.button(
-                "📊 Generar PPTX", key="gen_pptx",
-                disabled=not _PPTX_EXPORT_AVAILABLE, use_container_width=True,
+            _k3.metric(
+                f"Variación {int(sf.index[0])} → {int(sf.index[-1])}" if len(sf) >= 2 else "Variación",
+                _var,
+            )
+            _k4.metric("CAGR (crec. anual compuesto)", _cagr_sec(sf))
+            _peak = sf.idxmax() if len(sf) else None
+            _k5.metric(
+                "Año pico",
+                f"{int(_peak)}" if _peak is not None else "s/d",
+                f"{sf.max():,.2f}" if len(sf) else "",
+            )
+            _mk_r = mann_kendall_trend(sf.index.to_numpy(), sf.to_numpy()) if len(sf) >= 6 else None
+            _k6.metric(
+                "Tendencia (Mann-Kendall)",
+                _mk_r.trend if _mk_r else "s/d",
+                f"p={_mk_r.p_value:.3f}" if _mk_r else "",
+            )
+            return _mk_r
+
+        _mk_by_col: dict = {}
+        if len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi:
+            for _kpi_col in _sec_val_cols_kpi:
+                _ks = _sec_cols_dict_kpi.get(_kpi_col)
+                if _ks is None:
+                    continue
+                st.caption(f"**{_kpi_col}**")
+                _excl_col = st.multiselect(
+                    "Excluir años", options=sorted(_ks.index.tolist()), default=[],
+                    key=f"xp_excl_{_kpi_col}", label_visibility="collapsed",
+                    placeholder="Excluir años del análisis (opcional)…",
+                )
+                _ks_f = _ks[~_ks.index.isin(_excl_col)] if _excl_col else _ks
+                _mk_by_col[_kpi_col] = _render_kpi_row_sec(_ks_f, _kpi_col)
+            _kpi_lbl = _sec_val_cols_kpi[0]
+            _mk_sec = _mk_by_col.get(_kpi_lbl)
+        else:
+            _excl_single = st.multiselect(
+                "Excluir años del análisis KPI / estadísticas",
+                options=sorted(_sec_s.index.tolist()), default=[], key="xp_excl_single",
+                placeholder="Excluir años del análisis (opcional)…",
+            )
+            _ks_single = _sec_s[~_sec_s.index.isin(_excl_single)] if _excl_single else _sec_s
+            _kpi_lbl = _sec_lbl
+            _mk_sec = _render_kpi_row_sec(_ks_single, _sec_lbl)
+            _mk_by_col[_sec_lbl] = _mk_sec
+
+        st.divider()
+
+        _xp_c1, _xp_c2, _xp_c3 = st.columns(3)
+        _xp_chart = _xp_c1.radio("Tipo de gráfico", ["Línea", "Barras"], horizontal=True, key="xp_chart")
+        _xp_markers = _xp_c2.checkbox("Marcadores", value=True, key="xp_markers")
+        _xp_lowess = _xp_c3.checkbox("LOWESS (suavizado)", value=False, key="xp_lowess")
+        _xp_log = _xp_c1.checkbox("Escala logarítmica", value=False, key="xp_log")
+
+        _xp_lo, _xp_hi = int(_sec_s.index.min()), int(_sec_s.index.max())
+        if _xp_lo < _xp_hi:
+            _xp_range = st.slider(
+                "Rango de años (exploración)", min_value=_xp_lo, max_value=_xp_hi,
+                value=(_xp_lo, _xp_hi), key="xp_range",
+            )
+            _sec_s_filt = _sec_s[(_sec_s.index >= _xp_range[0]) & (_sec_s.index <= _xp_range[1])]
+        else:
+            st.caption(f"Serie de un único año: {_xp_lo}")
+            _xp_range = (_xp_lo, _xp_hi)
+            _sec_s_filt = _sec_s.copy()
+
+        def _filtered_for_stats_sec(col_name: str, raw_s: pd.Series) -> pd.Series:
+            _s2 = raw_s[(raw_s.index >= _xp_range[0]) & (raw_s.index <= _xp_range[1])]
+            _excl_key = f"xp_excl_{col_name}" if len(_sec_val_cols_kpi) > 1 else "xp_excl_single"
+            _excl_yrs = st.session_state.get(_excl_key, [])
+            if _excl_yrs:
+                _s2 = _s2[~_s2.index.isin(_excl_yrs)]
+            return _s2
+
+        _xp_show_cols: list[str] = []
+        if len(_sec_val_cols_kpi) > 1:
+            _xp_show_cols = st.multiselect(
+                "Columnas a graficar individualmente", options=_sec_val_cols_kpi,
+                default=_sec_val_cols_kpi, key="xp_show_cols",
             )
 
-        if gen_pdf or gen_pptx:
-            if not any([inc_kpis, inc_main_chart, inc_extra_charts, inc_ranking, inc_projection, inc_table]):
-                st.warning("Selecciona al menos una sección para incluir en el reporte.")
+        _desc_col, _dist_col = st.columns(2)
+        _rename_map = {
+            "count": "N obs.", "mean": "Media", "std": "Desv. estándar",
+            "min": "Mínimo", "25%": "Percentil 25", "50%": "Mediana",
+            "75%": "Percentil 75", "max": "Máximo",
+        }
+        with _desc_col:
+            st.markdown("**Estadísticas descriptivas**")
+            if len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi:
+                _desc_frames = {}
+                for _dcol in _sec_val_cols_kpi:
+                    _ds_raw = _sec_cols_dict_kpi.get(_dcol)
+                    if _ds_raw is None:
+                        continue
+                    _desc_frames[_dcol] = _filtered_for_stats_sec(_dcol, _ds_raw).describe().rename(_rename_map)
+                if _desc_frames:
+                    st.dataframe(pd.DataFrame(_desc_frames).style.format("{:,.4f}"), use_container_width=True)
+                for _mkcol, _mkres in _mk_by_col.items():
+                    if _mkres:
+                        st.caption(
+                            f"Mann-Kendall **{_mkcol}**: tendencia **{_mkres.trend}** "
+                            f"(p={_mkres.p_value:.4f}, método: {_mkres.method}). "
+                            f"Pendiente de Sen: **{_mkres.sen_slope:,.4f}** u/año."
+                        )
             else:
-                with st.spinner("Generando reporte..."):
-                    sections = build_report_sections(
-                        inc_kpis, inc_main_chart, inc_extra_charts, inc_stats,
-                        inc_ranking, inc_projection, inc_table,
+                _desc = _filtered_for_stats_sec(_sec_lbl, _sec_s).describe().rename(_rename_map)
+                st.dataframe(_desc.to_frame(name=_sec_lbl).style.format("{:,.4f}"), use_container_width=True)
+                if _mk_sec:
+                    st.caption(
+                        f"Mann-Kendall ({_kpi_lbl}): tendencia **{_mk_sec.trend}** "
+                        f"(p={_mk_sec.p_value:.4f}, método: {_mk_sec.method}). "
+                        f"Pendiente de Sen: **{_mk_sec.sen_slope:,.4f}** u/año."
                     )
-                if not sections:
-                    st.warning("No hay datos suficientes para generar el reporte con la selección actual.")
+
+        with _dist_col:
+            st.markdown("**Distribución**")
+            _hist_cols = (
+                list(_sec_cols_dict_kpi.items())
+                if (len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi)
+                else [(_sec_lbl, _sec_s)]
+            )
+            _hist_pairs = [_hist_cols[i:i + 2] for i in range(0, len(_hist_cols), 2)]
+            for _hrow in _hist_pairs:
+                _hcols_ui = st.columns(len(_hrow))
+                for _hci, (_hcol, _hs) in enumerate(_hrow):
+                    _hs_filt = _filtered_for_stats_sec(_hcol, _hs)
+                    _hvnz = _hs_filt[_hs_filt > 0]
+                    _hcolor = DEFAULT_PALETTE[list(dict(_hist_cols).keys()).index(_hcol) % len(DEFAULT_PALETTE)]
+                    _fig_h = go.Figure()
+                    if len(_hvnz) > 0:
+                        _fig_h.add_trace(go.Histogram(x=_hvnz.values, nbinsx=12, name=_hcol, marker_color=_hcolor, opacity=0.85))
+                        _fig_h.add_vline(x=float(_hvnz.mean()), line_dash="dash", line_color=SECONDARY_COLOR, annotation_text="Media")
+                        _fig_h.add_vline(x=float(_hvnz.median()), line_dash="dot", line_color=OK_COLOR, annotation_text="Mediana")
+                    _fig_h.update_layout(
+                        title=dict(text=_hcol, font=dict(size=12)), height=260,
+                        xaxis_title=_sec_units_lbl, yaxis_title="Frecuencia",
+                        margin=dict(t=35, b=30), showlegend=False,
+                    )
+                    _hcols_ui[_hci].plotly_chart(_fig_h, use_container_width=True)
+
+        st.divider()
+
+        _fig_sec = go.Figure()
+        _mode_sec = "lines+markers" if _xp_markers else "lines"
+        if _xp_show_cols and _sec_cols_dict_kpi:
+            for _ci, _col_name in enumerate(_xp_show_cols):
+                _col_s = _sec_cols_dict_kpi.get(_col_name)
+                if _col_s is None:
+                    continue
+                _col_s_filt = _col_s[(_col_s.index >= _xp_range[0]) & (_col_s.index <= _xp_range[1])]
+                _col_color = DEFAULT_PALETTE[_ci % len(DEFAULT_PALETTE)]
+                if _xp_chart == "Barras":
+                    _fig_sec.add_trace(go.Bar(x=_col_s_filt.index, y=_col_s_filt.values, name=_col_name, marker_color=_col_color))
                 else:
-                    if gen_pdf:
-                        pdf_bytes = build_pdf_report(sections, report_title)
-                        st.download_button(
-                            "⬇️ Descargar PDF", data=pdf_bytes,
-                            file_name=f"{report_title.replace(' ', '_')}.pdf",
-                            mime="application/pdf", key="dl_pdf",
-                        )
-                    if gen_pptx:
-                        pptx_bytes = build_pptx_report(sections, report_title)
-                        st.download_button(
-                            "⬇️ Descargar PPTX", data=pptx_bytes,
-                            file_name=f"{report_title.replace(' ', '_')}.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            key="dl_pptx",
-                        )
+                    _fig_sec.add_trace(go.Scatter(x=_col_s_filt.index, y=_col_s_filt.values, mode=_mode_sec, name=_col_name, line=dict(width=2, color=_col_color), marker=dict(size=5)))
+        else:
+            if _xp_chart == "Barras":
+                _fig_sec.add_trace(go.Bar(x=_sec_s_filt.index, y=_sec_s_filt.values, name=_sec_lbl, marker_color=PRIMARY_COLOR))
+            else:
+                _fig_sec.add_trace(go.Scatter(x=_sec_s_filt.index, y=_sec_s_filt.values, mode=_mode_sec, name=_sec_lbl, line=dict(width=2, color=PRIMARY_COLOR), marker=dict(size=5)))
+
+        if _xp_lowess and len(_sec_s_filt) >= 4:
+            _sm_sec = smooth_series(_sec_s_filt.index.to_numpy(), _sec_s_filt.to_numpy())
+            if _sm_sec is not None:
+                _fig_sec.add_trace(go.Scatter(x=_sm_sec[0], y=_sm_sec[1], mode="lines", name="LOWESS", line=dict(width=2, color=OK_COLOR)))
+
+        _fig_sec.update_layout(
+            height=420, hovermode="x unified", yaxis_title=_sec_units_lbl,
+            yaxis_type="log" if _xp_log else "linear",
+            xaxis=dict(dtick=1, tickangle=-45),
+            legend=dict(orientation="h", y=-0.25), margin=dict(t=30), barmode="group",
+        )
+        st.plotly_chart(_fig_sec, use_container_width=True)
+
+        st.divider()
+
+        st.markdown("#### 📈 Análisis de tendencia detallado")
+        _trend_cols_list = (
+            list(_sec_cols_dict_kpi.items())
+            if (len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi)
+            else [(_sec_lbl, _sec_s)]
+        )
+        for _tcol, _ts_raw in _trend_cols_list:
+            _ts = _filtered_for_stats_sec(_tcol, _ts_raw)
+            with st.expander(f"🔎 Tendencia — {_tcol}", expanded=False):
+                if len(_ts) < 6:
+                    st.info("Se necesitan al menos 6 años para el análisis de tendencia (Mann-Kendall).")
+                    continue
+                _mk_t = mann_kendall_trend(_ts.index.to_numpy(), _ts.to_numpy())
+                _t1, _t2, _t3 = st.columns(3)
+                _t1.metric("Tendencia (Mann-Kendall)", _mk_t.trend if _mk_t else "s/d")
+                _t2.metric("p-valor", f"{_mk_t.p_value:.4f}" if _mk_t else "s/d", significance_label(_mk_t.p_value) if _mk_t else "")
+                _t3.metric("Pendiente de Sen (u/año)", f"{_mk_t.sen_slope:,.4f}" if _mk_t else "s/d")
+
+                _trend_lin = linear_trend(_ts.index.to_numpy(), _ts.to_numpy())
+                _fig_t = go.Figure()
+                _fig_t.add_trace(go.Scatter(x=_ts.index, y=_ts.values, mode="lines+markers", name=_tcol, line=dict(width=2, color=PRIMARY_COLOR), marker=dict(size=5)))
+                if _trend_lin is not None:
+                    _fig_t.add_trace(go.Scatter(x=_trend_lin.x, y=_trend_lin.y_pred, mode="lines", name=f"Tendencia lineal (R²={_trend_lin.r2:.2f})", line=dict(width=2, color=SECONDARY_COLOR, dash="dash")))
+                _fig_t.update_layout(height=300, hovermode="x unified", yaxis_title=_sec_units_lbl, xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.3), margin=dict(t=20))
+                st.plotly_chart(_fig_t, use_container_width=True)
+                if _mk_t:
+                    sig_word = significance_label(_mk_t.p_value)
+                    st.caption(
+                        f"Tendencia **{_mk_t.trend}** (p={_mk_t.p_value:.4f}, método: {_mk_t.method}). "
+                        f"Pendiente de Sen: **{_mk_t.sen_slope:,.4f}** unidades/año — {sig_word.lower()}."
+                    )
+
+        st.divider()
+
+        with st.expander("🔍 Detección automática de punto de quiebre"):
+            _bp_col_options = (
+                list(_sec_cols_dict_kpi.keys()) if (len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi) else [_sec_lbl]
+            )
+            if len(_bp_col_options) > 1:
+                _bp_sel_col = st.selectbox("Variable a analizar", options=_bp_col_options, key="bp_sel_col")
+                _bp_raw = _sec_cols_dict_kpi.get(_bp_sel_col, _sec_s)
+            else:
+                _bp_sel_col = _sec_lbl
+                _bp_raw = _sec_s
+            _bp_series = _bp_raw[(_bp_raw.index >= _xp_range[0]) & (_bp_raw.index <= _xp_range[1])]
+            _auto_sec = detect_breakpoint(_bp_series.index.to_numpy(), _bp_series.to_numpy()) if len(_bp_series) >= 6 else None
+            if _auto_sec is None:
+                st.info("Necesitas al menos 6 años en el rango seleccionado.")
+            else:
+                _ac1, _ac2, _ac3 = st.columns(3)
+                _ac1.metric("Año de quiebre detectado", f"{_auto_sec.year}")
+                _ac2.metric("p-valor (test de Chow)", f"{_auto_sec.p_value:.4f}", significance_label(_auto_sec.p_value))
+                _ac3.metric("Pendiente antes → después", f"{_auto_sec.slope_before:,.4f} → {_auto_sec.slope_after:,.4f}")
+                _fig_ab = go.Figure()
+                _fig_ab.add_trace(go.Scatter(x=_bp_series.index, y=_bp_series.values, mode="markers", name="Observado", marker=dict(color=PRIMARY_COLOR, size=6)))
+                _fig_ab.add_trace(go.Scatter(x=_auto_sec.x_before, y=_auto_sec.y_pred_before, mode="lines", name="Ajuste antes", line=dict(color=SECONDARY_COLOR, width=2)))
+                _fig_ab.add_trace(go.Scatter(x=_auto_sec.x_after, y=_auto_sec.y_pred_after, mode="lines", name="Ajuste después", line=dict(color=OK_COLOR, width=2)))
+                _fig_ab.add_vline(x=_auto_sec.year, line_dash="dot", line_color="gray")
+                _fig_ab.update_layout(height=320, hovermode="x unified", yaxis_title=_sec_units_lbl, margin=dict(t=20), xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.3))
+                st.plotly_chart(_fig_ab, use_container_width=True)
+
+        st.download_button(
+            "⬇️ Descargar serie adicional (CSV)",
+            _sec_s_filt.reset_index().rename(columns={"index": "Anio", 0: _sec_lbl}).to_csv(index=False).encode("utf-8"),
+            file_name="serie_adicional.csv", mime="text/csv", key="dl_sec_csv",
+        )
+
+with tab_cross:
+    st.markdown("#### Análisis cruzado: casos de cáncer vs. base adicional")
+
+    if "secondary_serie" not in st.session_state:
+        st.info(
+            "Carga una base de datos adicional desde el panel lateral "
+            "(📊 **Base de datos adicional**) para habilitar este análisis."
+        )
+    else:
+        _sec_s_x: pd.Series = st.session_state["secondary_serie"]
+        _sec_lbl_x: str = st.session_state.get("secondary_label", "Serie adicional")
+        _sec_units_x: str = st.session_state.get("secondary_units", "Valor")
+
+        # Serie principal: casos totales por año para la selección actual
+        # (localización + departamentos + exclusiones del panel lateral).
+        _prim_s = year_series  # ya calculada más arriba (Anio -> Casos)
+        _idx_common = _prim_s.index.intersection(_sec_s_x.index)
+
+        if len(_idx_common) < 4:
+            st.warning(
+                f"Las dos series solo se solapan en {len(_idx_common)} año(s). "
+                "Ajusta el rango de años en el panel lateral o sube una base "
+                "adicional con más años en común con los casos de cáncer."
+            )
+        else:
+            _p = _prim_s.reindex(_idx_common)
+            _s = _sec_s_x.reindex(_idx_common)
+
+            st.caption(
+                f"Período de solapamiento: {int(_idx_common.min())} a "
+                f"{int(_idx_common.max())} · {len(_idx_common)} año(s) en común"
+            )
+
+            st.markdown("#### Gráfico cruzado: casos de cáncer + base adicional")
+            _cx0_c1, _cx0_c2, _cx0_c3 = st.columns(3)
+            _cx0_markers = _cx0_c1.checkbox("Marcadores", value=True, key="cx0_markers")
+            _cx0_log_l = _cx0_c2.checkbox("Log eje izq.", value=False, key="cx0_log_l")
+            _cx0_log_r = _cx0_c3.checkbox("Log eje dcho.", value=False, key="cx0_log_r")
+
+            _cx0_cols_dict = st.session_state.get("secondary_cols_dict", {})
+            _cx0_val_cols = st.session_state.get("secondary_val_cols", [])
+            _cx0_sel_cols: list[str] = []
+            if len(_cx0_val_cols) > 1:
+                _cx0_sel_cols = st.multiselect(
+                    "Columnas adicionales a superponer", options=_cx0_val_cols,
+                    default=_cx0_val_cols, key="cx0_sel_cols",
+                )
+
+            _cx0_mode = "lines+markers" if _cx0_markers else "lines"
+            _fig_cx0 = go.Figure()
+            _fig_cx0.add_trace(go.Scatter(
+                x=_p.index, y=_p.values, mode=_cx0_mode, name=f"Casos — {site}",
+                line=dict(color=PRIMARY_COLOR, width=2), marker=dict(size=5), yaxis="y1",
+            ))
+            _cx0_palette = [SECONDARY_COLOR, OK_COLOR, WARN_COLOR, "#8850c4", "#5c6ac4"]
+            if _cx0_sel_cols and _cx0_cols_dict:
+                for _ci, _col_name in enumerate(_cx0_sel_cols):
+                    _col_s_raw = _cx0_cols_dict.get(_col_name)
+                    if _col_s_raw is None:
+                        continue
+                    _col_aligned = _col_s_raw.reindex(_idx_common)
+                    _fig_cx0.add_trace(go.Scatter(
+                        x=_col_aligned.index, y=_col_aligned.values, mode=_cx0_mode, name=_col_name,
+                        line=dict(color=_cx0_palette[_ci % len(_cx0_palette)], width=2), marker=dict(size=5), yaxis="y2",
+                    ))
+            else:
+                _fig_cx0.add_trace(go.Scatter(
+                    x=_s.index, y=_s.values, mode=_cx0_mode, name=_sec_lbl_x,
+                    line=dict(color=SECONDARY_COLOR, width=2), marker=dict(size=5), yaxis="y2",
+                ))
+            _fig_cx0.update_layout(
+                height=440, hovermode="x unified",
+                yaxis=dict(title=dict(text=f"Casos — {site}", font=dict(color=PRIMARY_COLOR)), type="log" if _cx0_log_l else "linear", tickfont=dict(color=PRIMARY_COLOR)),
+                yaxis2=dict(title=dict(text=f"{_sec_lbl_x} ({_sec_units_x})", font=dict(color=SECONDARY_COLOR)), type="log" if _cx0_log_r else "linear", overlaying="y", side="right", tickfont=dict(color=SECONDARY_COLOR)),
+                legend=dict(orientation="h", y=-0.28), margin=dict(t=35),
+                xaxis=dict(dtick=1, tickangle=-45),
+            )
+            st.plotly_chart(_fig_cx0, use_container_width=True)
+
+            st.divider()
+
+            st.markdown("#### 1. Comparación visual (series normalizadas, base = 100 en el primer año)")
+            _cx_show_raw = st.checkbox("Mostrar también valores absolutos (doble eje)", value=False, key="cx_raw")
+
+            _p_base = _p.iloc[0] if _p.iloc[0] != 0 else 1
+            _s_base = _s.iloc[0] if _s.iloc[0] != 0 else 1
+            _fig_cmp = go.Figure()
+            _fig_cmp.add_trace(go.Scatter(x=_idx_common, y=_p.values / _p_base * 100, mode="lines", name=f"Casos — {site} (índice)", line=dict(color=PRIMARY_COLOR, width=2)))
+            _fig_cmp.add_trace(go.Scatter(x=_idx_common, y=_s.values / _s_base * 100, mode="lines", name=f"{_sec_lbl_x} (índice)", line=dict(color=SECONDARY_COLOR, width=2)))
+            if _cx_show_raw:
+                _fig_cmp.add_trace(go.Scatter(x=_idx_common, y=_p.values, mode="lines", name="Casos (eje dcho.)", yaxis="y2", line=dict(color=PRIMARY_COLOR, width=1, dash="dot")))
+                _fig_cmp.add_trace(go.Scatter(x=_idx_common, y=_s.values, mode="lines", name=f"{_sec_lbl_x} (eje dcho.)", yaxis="y2", line=dict(color=SECONDARY_COLOR, width=1, dash="dot")))
+                _fig_cmp.update_layout(yaxis2=dict(title="Valores absolutos", overlaying="y", side="right"))
+            _fig_cmp.update_layout(height=400, hovermode="x unified", yaxis_title="Índice (primer año = 100)", legend=dict(orientation="h", y=-0.25), margin=dict(t=30), xaxis=dict(dtick=1, tickangle=-45))
+            st.plotly_chart(_fig_cmp, use_container_width=True)
+
+            st.divider()
+
+            st.markdown("#### 2. Correlación contemporánea")
+            from scipy.stats import pearsonr, spearmanr
+
+            _mask_valid = (_p > 0) & (_s > 0)
+            _p_v = _p[_mask_valid].values
+            _s_v = _s[_mask_valid].values
+
+            if len(_p_v) >= 4:
+                _r_pear, _p_pear = pearsonr(_p_v, _s_v)
+                _r_spear, _p_spear = spearmanr(_p_v, _s_v)
+                _cc1, _cc2, _cc3, _cc4 = st.columns(4)
+                _cc1.metric("Pearson r", f"{_r_pear:.4f}")
+                _cc2.metric("p-valor (Pearson)", f"{_p_pear:.4f}", significance_label(_p_pear))
+                _cc3.metric("Spearman ρ", f"{_r_spear:.4f}")
+                _cc4.metric("p-valor (Spearman)", f"{_p_spear:.4f}", significance_label(_p_spear))
+
+                _fig_sc = go.Figure()
+                _fig_sc.add_trace(go.Scatter(
+                    x=_p_v, y=_s_v, mode="markers",
+                    marker=dict(color=np.arange(len(_p_v)), colorscale="Blues", showscale=True, size=8, colorbar=dict(title="Año")),
+                    text=[str(int(y)) for y in _idx_common[_mask_valid]],
+                    hovertemplate="<b>%{text}</b><br>Casos: %{x:,.0f}<br>" + f"{_sec_lbl_x}: " + "%{y:,.2f}<extra></extra>",
+                    name="Años",
+                ))
+                if len(_p_v) >= 3:
+                    _z = np.polyfit(_p_v, _s_v, 1)
+                    _x_trend = np.linspace(_p_v.min(), _p_v.max(), 100)
+                    _fig_sc.add_trace(go.Scatter(x=_x_trend, y=np.polyval(_z, _x_trend), mode="lines", name=f"Tendencia (r={_r_pear:.3f})", line=dict(color=SECONDARY_COLOR, width=2, dash="dash")))
+                _fig_sc.update_layout(height=380, xaxis_title=f"Casos — {site}", yaxis_title=f"{_sec_lbl_x} ({_sec_units_x})", legend=dict(orientation="h", y=-0.25), margin=dict(t=20))
+                st.plotly_chart(_fig_sc, use_container_width=True)
+
+                interp_r = (
+                    "correlación positiva fuerte" if _r_pear >= 0.7
+                    else "correlación positiva moderada" if _r_pear >= 0.4
+                    else "correlación positiva débil" if _r_pear >= 0.1
+                    else "correlación negativa fuerte" if _r_pear <= -0.7
+                    else "correlación negativa moderada" if _r_pear <= -0.4
+                    else "correlación negativa débil" if _r_pear <= -0.1
+                    else "sin correlación lineal apreciable"
+                )
+                st.caption(
+                    f"Las dos series muestran **{interp_r}** (Pearson r={_r_pear:.3f}, p={_p_pear:.4f}; "
+                    f"Spearman ρ={_r_spear:.3f}, p={_p_spear:.4f}). El scatter está coloreado "
+                    "cronológicamente — el patrón de dispersión en la dirección del tiempo puede "
+                    "revelar si la asociación cambió en distintos subperíodos. Correlación no implica causalidad."
+                )
+            else:
+                st.info("Muy pocos años con valores positivos en ambas series para calcular correlación.")
+
+            st.divider()
+
+            st.markdown("#### 3. Correlación cruzada con rezago (lead-lag)")
+            st.caption(
+                "Muestra si la serie adicional ANTICIPA o SIGUE a los casos de cáncer. "
+                "Un rezago negativo (lag<0) significativo indica que la variable adicional "
+                "predice los casos con ese número de años de anticipación."
+            )
+            _max_lag = st.slider("Rezagos máximos a explorar (años)", 1, max(1, min(6, len(_idx_common) // 3)), min(3, max(1, len(_idx_common) // 3)), key="cx_lag")
+
+            _pv = _p.values.astype(float)
+            _sv = _s.values.astype(float)
+            _pv_std = (_pv - _pv.mean()) / (_pv.std() + 1e-12)
+            _sv_std = (_sv - _sv.mean()) / (_sv.std() + 1e-12)
+            _lags = np.arange(-_max_lag, _max_lag + 1)
+            _ccf_vals = []
+            for _lag in _lags:
+                if _lag < 0:
+                    _ccf_vals.append(float(np.corrcoef(_pv_std[-_lag:], _sv_std[:_lag])[0, 1]))
+                elif _lag > 0:
+                    _ccf_vals.append(float(np.corrcoef(_pv_std[:-_lag], _sv_std[_lag:])[0, 1]))
+                else:
+                    _ccf_vals.append(float(np.corrcoef(_pv_std, _sv_std)[0, 1]))
+            _sig_band = 1.96 / np.sqrt(len(_idx_common))
+            _bar_colors = [OK_COLOR if abs(v) >= _sig_band else "#AAAAAA" for v in _ccf_vals]
+            _fig_ccf = go.Figure()
+            _fig_ccf.add_trace(go.Bar(x=_lags, y=_ccf_vals, marker_color=_bar_colors, name="CCF"))
+            _fig_ccf.add_hline(y=_sig_band, line_dash="dot", line_color=WARN_COLOR, annotation_text=f"±{_sig_band:.2f} (banda 95%)")
+            _fig_ccf.add_hline(y=-_sig_band, line_dash="dot", line_color=WARN_COLOR)
+            _fig_ccf.update_layout(height=320, xaxis_title="Rezago (años; negativo = serie adicional lidera)", yaxis_title="Correlación cruzada", legend=dict(orientation="h", y=-0.3), margin=dict(t=20), xaxis=dict(tickmode="linear", dtick=1))
+            st.plotly_chart(_fig_ccf, use_container_width=True)
+
+            _best_lag_idx = int(np.argmax(np.abs(_ccf_vals)))
+            _best_lag = int(_lags[_best_lag_idx])
+            _best_ccf = _ccf_vals[_best_lag_idx]
+            if _best_lag < 0:
+                _lag_interp = f"la serie adicional lidera a los casos de cáncer en {abs(_best_lag)} año(s)"
+            elif _best_lag > 0:
+                _lag_interp = f"los casos de cáncer lideran a la serie adicional en {_best_lag} año(s)"
+            else:
+                _lag_interp = "las dos series están más correlacionadas sin rezago (contemporáneamente)"
+            st.caption(
+                f"El rezago de máxima correlación es **{_best_lag:+d} año(s)** (r={_best_ccf:.3f}), "
+                f"lo que sugiere que {_lag_interp}. Interpreta con cautela si hay pocos años en común, "
+                "ya que la banda de significancia se estrecha con más observaciones."
+            )
+
+            st.divider()
+
+            _joint_df = pd.DataFrame({"Anio": _idx_common, f"Casos_{site}": _p.values, _sec_lbl_x: _s.values})
+            st.download_button(
+                "⬇️ Descargar tabla cruzada alineada (CSV)",
+                _joint_df.to_csv(index=False).encode("utf-8"),
+                file_name="analisis_cruzado.csv", mime="text/csv", key="dl_cross_csv",
+            )
 
 # ---------------------------------------------------------------------------
 # Autoría
@@ -2228,3 +2403,53 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+_cite_year = pd.Timestamp.today().year
+_cite_url = "https://mlcancerperu.streamlit.app"
+
+st.markdown(
+    f"""<div class="citation-box">
+<h4>REFERENCIA WEB (formato AMA)</h4>
+<p>Orrego-Ferreyros LA. Cáncer en el Tiempo — Perú: Casos Registrados por el INEN.
+Instituto Nacional de Enfermedades Neoplásicas. Published {_cite_year}. Accessed [Mes Día, Año]. {_cite_url}</p>
+<h4>WEB REFERENCE (AMA format)</h4>
+<p>Orrego-Ferreyros LA. Cancer Over Time — Peru: Cases Registered by INEN. National Institute
+of Neoplastic Diseases. Published {_cite_year}. Accessed [Month Day, Year]. {_cite_url}</p>
+</div>""",
+    unsafe_allow_html=True,
+)
+
+_ris_content = (
+    "TY  - ELEC\n"
+    "AU  - Orrego-Ferreyros, Luis Alexander\n"
+    "TI  - Cáncer en el Tiempo — Perú: Casos Registrados por el INEN / "
+    "Cancer Over Time — Peru: Cases Registered by INEN\n"
+    f"PY  - {_cite_year}\n"
+    "PB  - Instituto Nacional de Enfermedades Neoplásicas\n"
+    f"UR  - {_cite_url}\n"
+    "ER  - \n"
+)
+_bib_content = (
+    f"@misc{{orregoferreyros{_cite_year}cancerentiempo,\n"
+    "  author = {Orrego-Ferreyros, Luis Alexander},\n"
+    "  title = {C{\\'a}ncer en el Tiempo --- Per{\\'u}: Casos Registrados por el INEN "
+    "/ Cancer Over Time --- Peru: Cases Registered by INEN},\n"
+    f"  year = {{{_cite_year}}},\n"
+    "  publisher = {Instituto Nacional de Enfermedades Neopl{\\'a}sicas},\n"
+    f"  url = {{{_cite_url}}}\n"
+    "}\n"
+)
+_endnote_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<xml><records><record>
+<ref-type name="Web Page">12</ref-type>
+<contributors><authors><author>Orrego-Ferreyros, Luis Alexander</author></authors></contributors>
+<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Registrados por el INEN / Cancer Over Time \u2014 Peru: Cases Registered by INEN</title></titles>
+<dates><year>{_cite_year}</year></dates>
+<publisher>Instituto Nacional de Enfermedades Neopl\u00e1sicas</publisher>
+<urls><related-urls><url>{_cite_url}</url></related-urls></urls>
+</record></records></xml>
+"""
+_dl1, _dl2, _dl3 = st.columns(3)
+_dl1.download_button("⬇️ BibTeX (*.bib)", _bib_content, file_name="cancer_en_tiempo_inen.bib", mime="text/plain")
+_dl2.download_button("⬇️ EndNote XML (*.xml)", _endnote_xml, file_name="cancer_en_tiempo_inen.xml", mime="application/xml")
+_dl3.download_button("⬇️ RIS (*.ris)", _ris_content, file_name="cancer_en_tiempo_inen.ris", mime="application/x-research-info-systems")
