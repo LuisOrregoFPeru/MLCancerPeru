@@ -528,3 +528,18 @@ def smooth_series(
     x, y = x[order], y[order]
     smoothed = _lowess(y, x, frac=frac, return_sorted=True)
     return smoothed[:, 0], smoothed[:, 1]
+
+
+def significance_label(p_value: float, alpha: float = 0.05) -> str:
+    """Etiqueta de significancia legible para un p-valor, usada en las
+    pestañas de exploración de la base adicional y análisis cruzado.
+    "Marginal" cubre la zona gris entre α y 2×α (p. ej. p entre 0.05 y
+    0.10 con α=0.05), donde el resultado no es concluyente pero tampoco
+    claramente nulo."""
+    if p_value is None or not np.isfinite(p_value):
+        return "s/d"
+    if p_value < alpha:
+        return "Significativo"
+    if p_value < 2 * alpha:
+        return "Marginal"
+    return "No significativo"
