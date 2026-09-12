@@ -897,6 +897,9 @@ def render_site_analysis_chart(
     compact: bool = False,
     key_suffix: str = "",
     depts_override: list[str] | None = None,
+    local_event_year: int | None = None,
+    local_event_lag: int = 0,
+    local_breakpoint: bool = False,
 ) -> None:
     """Construye y renderiza el gráfico de una localización del tumor
     primario, con línea de tendencia, suavizado LOWESS, quiebre
@@ -913,6 +916,18 @@ def render_site_analysis_chart(
     `depts_override`, si se especifica, reemplaza la lista global de
     departamentos seleccionados (usado para el modo "un gráfico por
     departamento" — cada llamada solo dibuja un departamento a la vez).
+
+    `local_event_year`, si se especifica, evalúa el quiebre por evento
+    de forma independiente para ESTE gráfico (con su propio año y años
+    de implementación), en vez de usar la configuración global del
+    panel lateral — pensado para los gráficos adicionales, donde cada
+    uno puede corresponder a un evento distinto (p. ej. una norma que
+    aplicó en años diferentes por departamento).
+
+    `local_breakpoint`, si es True, activa la detección automática de
+    punto de quiebre para ESTE gráfico independientemente del switch
+    global del panel lateral (que sigue aplicando igual si está
+    activado; ambos se combinan con "o", no se excluyen).
     """
     depts_to_plot = depts_override if depts_override is not None else depts_selected
 
@@ -1012,8 +1027,12 @@ def render_site_analysis_chart(
 
     bp_summary = None
     bp_dept = None
-    if show_breakpoint:
-        if breakpoint_target and breakpoint_target in depts_to_plot:
+    if local_breakpoint or show_breakpoint:
+        if local_breakpoint and len(depts_to_plot) == 1:
+            # Activado localmente en este gráfico específico: siempre
+            # usa el único departamento que se está mostrando aquí.
+            bp_dept = depts_to_plot[0]
+        elif breakpoint_target and breakpoint_target in depts_to_plot:
             bp_dept = breakpoint_target
         elif len(depts_to_plot) == 1:
             # Un solo departamento en este gráfico: se usa como objetivo
@@ -1078,8 +1097,16 @@ def render_site_analysis_chart(
 
     arb_summary = None
     arb_dept = None
-    if show_arbitrary_break and arb_break_year is not None:
-        if arb_target and arb_target in depts_to_plot:
+    # Si se especifica un evento local (independiente por gráfico), tiene
+    # prioridad sobre la configuración global del panel lateral y siempre
+    # se evalúa para el único departamento de este gráfico.
+    effective_break_year = local_event_year if local_event_year is not None else arb_break_year
+    effective_lag = local_event_lag if local_event_year is not None else arb_lag
+    use_arb = (local_event_year is not None) or show_arbitrary_break
+    if use_arb and effective_break_year is not None:
+        if local_event_year is not None:
+            arb_dept = depts_to_plot[0] if len(depts_to_plot) == 1 else None
+        elif arb_target and arb_target in depts_to_plot:
             arb_dept = arb_target
         elif len(depts_to_plot) == 1:
             arb_dept = depts_to_plot[0]
@@ -1088,13 +1115,13 @@ def render_site_analysis_chart(
         arb = chow_test_arbitrary_break(
             sub_arb["Anio"].to_numpy(),
             sub_arb["Casos"].to_numpy(),
-            break_year=int(arb_break_year),
-            implementation_lag=int(arb_lag),
+            break_year=int(effective_break_year),
+            implementation_lag=int(effective_lag),
         )
         if arb is None:
             st.info(
-                f"No hay suficientes años antes/después de {int(arb_break_year)} "
-                f"(considerando {int(arb_lag)} año(s) de implementación) en "
+                f"No hay suficientes años antes/después de {int(effective_break_year)} "
+                f"(considerando {int(effective_lag)} año(s) de implementación) en "
                 f"**{arb_dept}** ({site_val}) para aplicar el test (se requieren al "
                 "menos 3 años a cada lado)."
             )
@@ -1240,7 +1267,19 @@ def render_site_analysis_chart(
 
 
 with tab_graph:
-    render_site_analysis_chart(site, filtered, compact=False, key_suffix="main")
+    _local_bp_main = st.checkbox(
+        "🔍 Detectar punto de quiebre (cambio estructural) en este gráfico",
+        value=False, key="local_bp_main",
+        help=(
+            "Además del switch del panel lateral, actívalo aquí para forzar "
+            "la detección automática de quiebre en el gráfico principal sin "
+            "tener que ir a la barra lateral."
+        ),
+    )
+    render_site_analysis_chart(
+        site, filtered, compact=False, key_suffix="main",
+        local_breakpoint=_local_bp_main,
+    )
 
     # -----------------------------------------------------------------
     # Gráficos adicionales: comparar simultáneamente otras localizaciones
@@ -1248,6 +1287,35 @@ with tab_graph:
     # por fila), con el mismo análisis estadístico y personalización de
     # colores que el gráfico principal.
     # -----------------------------------------------------------------
+    def _local_event_controls(widget_key: str) -> tuple[int | None, int]:
+        """Control de 'quiebre por evento' independiente para un gráfico
+        adicional específico — año y años de implementación propios,
+        sin depender de la configuración global del panel lateral."""
+        with st.expander("🏛️ Quiebre por evento en este gráfico", expanded=False):
+            _on = st.checkbox(
+                "Evaluar en este gráfico", value=False, key=f"local_evt_on_{widget_key}",
+            )
+            _yr, _lag = None, 0
+            if _on:
+                _yr = st.number_input(
+                    "Año del evento", min_value=year_min, max_value=year_max,
+                    value=min(max(year_min + 1, (year_min + year_max) // 2), year_max),
+                    step=1, key=f"local_evt_year_{widget_key}",
+                )
+                _lag = st.slider(
+                    "Años de implementación a excluir", 0, 5, 0,
+                    key=f"local_evt_lag_{widget_key}",
+                )
+        return (int(_yr) if _on else None), int(_lag)
+
+    def _local_breakpoint_control(widget_key: str) -> bool:
+        """Checkbox de detección automática de quiebre, independiente
+        para un gráfico adicional específico."""
+        return st.checkbox(
+            "🔍 Detectar punto de quiebre (cambio estructural) en este gráfico",
+            value=False, key=f"local_bp_{widget_key}",
+        )
+
     extra_sites_to_plot = [s for s in extra_sites if s != site]
     if show_extra_sites and extra_sites_to_plot:
         st.markdown("---")
@@ -1269,9 +1337,13 @@ with tab_graph:
                         if extra_frames
                         else pd.DataFrame(columns=["Anio", "Casos", "Departamento"])
                     )
+                    _local_bp_site = _local_breakpoint_control(f"site_{extra_site}")
+                    _le_year, _le_lag = _local_event_controls(f"site_{extra_site}")
                     render_site_analysis_chart(
                         extra_site, extra_filtered, compact=True,
                         key_suffix=f"extra_{extra_site}",
+                        local_event_year=_le_year, local_event_lag=_le_lag,
+                        local_breakpoint=_local_bp_site,
                     )
 
     # -----------------------------------------------------------------
@@ -1291,10 +1363,14 @@ with tab_graph:
                         one_dept, site, year_range[0], year_range[1]
                     ).copy()
                     dept_series["Departamento"] = one_dept
+                    _local_bp_dept = _local_breakpoint_control(f"dept_{one_dept}")
+                    _le_year, _le_lag = _local_event_controls(f"dept_{one_dept}")
                     render_site_analysis_chart(
                         site, dept_series, compact=True,
                         key_suffix=f"dept_{one_dept}",
                         depts_override=[one_dept],
+                        local_event_year=_le_year, local_event_lag=_le_lag,
+                        local_breakpoint=_local_bp_dept,
                     )
     elif show_dept_split and not dept_split_list:
         st.info(
@@ -2398,7 +2474,8 @@ st.markdown(
     """
     <p style="text-align:center; color:#666; font-size:0.85rem;">
     © Luis A. Orrego Ferreyros, DDS, Econ., MCE, MMD, PhD(c), CQRM ·
-    Epidemiólogo y Economista de la Salud · INEN
+    Epidemiólogo y Economista de la Salud ·
+    Dirección de Servicios de Apoyo al Diagnóstico y Tratamiento — INEN
     </p>
     """,
     unsafe_allow_html=True,
