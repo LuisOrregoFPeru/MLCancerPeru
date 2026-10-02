@@ -26,6 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from budget_processing import MONTO_COLS, MONTO_LABELS, load_budget_data
 from data_processing import (
     ALL_SITES_LABEL,
     PERU_LABEL,
@@ -143,6 +144,10 @@ DEFAULT_PALETTE = [
     PRIMARY_COLOR, SECONDARY_COLOR, "#e07a2c", "#3ba776", "#8850c4",
     "#c94141", "#4aa8c9", "#c9a13b", "#5c6ac4", "#7d7d7d",
 ]
+
+OK_COLOR = "#3ba776"
+WARN_COLOR = "#c9a13b"
+BAD_COLOR = "#c94141"
 
 
 def format_region_list(regions: list[str], max_show: int = 3) -> str:
@@ -476,6 +481,60 @@ with st.sidebar:
                     "secondary_cols_dict", "secondary_val_cols",
                 ]:
                     st.session_state.pop(_k, None)
+                st.rerun()
+
+    with st.expander("💰 Ejecución presupuestal INEN (base nativa)", expanded=False):
+        st.caption(
+            "Base de datos nativa incluida en este dashboard: ejecución "
+            "presupuestal del INEN (PIA, PIM, Compromiso, Devengado, Girado) "
+            "por año y fuente de financiamiento, 2000–2026. Un clic la carga "
+            "en la pestaña **💰 Análisis presupuestal** y, automáticamente, "
+            "en **🔀 Análisis cruzado** frente a los casos de cáncer — sin "
+            "necesidad de subir ni mapear ningún archivo."
+        )
+        if st.button("📥 Cargar ejecución presupuestal INEN", key="btn_load_budget"):
+            try:
+                _bud = load_budget_data()
+                _ba = _bud["anual"].set_index("Anio")
+                st.session_state["budget_anual"] = _bud["anual"]
+                st.session_state["budget_detalle"] = _bud["detalle"]
+                # Alimenta automáticamente la infraestructura genérica de
+                # "serie adicional" para que Exploración y Análisis cruzado
+                # tengan esta base lista de inmediato, sin pasos manuales.
+                st.session_state["secondary_serie"] = _ba["Devengado"]
+                st.session_state["secondary_label"] = "Ejecución presupuestal INEN"
+                st.session_state["secondary_units"] = "S/ (Soles)"
+                st.session_state["secondary_cols_dict"] = {
+                    c: _ba[c] for c in ["PIA", "PIM", "Compromiso", "Devengado", "Girado"]
+                }
+                st.session_state["secondary_val_cols"] = [
+                    "PIA", "PIM", "Compromiso", "Devengado", "Girado"
+                ]
+                st.success(
+                    f"✓ Ejecución presupuestal INEN cargada — {len(_ba)} año(s) "
+                    f"({int(_ba.index.min())} a {int(_ba.index.max())})"
+                )
+            except Exception as _e:  # noqa: BLE001
+                st.error(f"No se pudo cargar la base presupuestal: {_e}")
+
+        if "budget_anual" in st.session_state:
+            _ban = st.session_state["budget_anual"]
+            st.info(
+                f"**Ejecución presupuestal INEN** cargada — {len(_ban)} año(s) "
+                f"({int(_ban['Anio'].min())} a {int(_ban['Anio'].max())})"
+            )
+            if st.button("🗑️ Quitar base presupuestal", key="btn_rm_budget"):
+                _was_budget_secondary = str(
+                    st.session_state.get("secondary_label", "")
+                ).startswith("Ejecución presupuestal")
+                for _k in ["budget_anual", "budget_detalle"]:
+                    st.session_state.pop(_k, None)
+                if _was_budget_secondary:
+                    for _k in [
+                        "secondary_serie", "secondary_label", "secondary_units",
+                        "secondary_cols_dict", "secondary_val_cols",
+                    ]:
+                        st.session_state.pop(_k, None)
                 st.rerun()
 
     st.subheader("Localización del tumor primario")
@@ -881,11 +940,12 @@ else:
 
 (
     tab_graph, tab_table, tab_ranking, tab_ranking_anim, tab_projection,
-    tab_downloads, tab_explore_sec, tab_cross,
+    tab_downloads, tab_budget, tab_explore_sec, tab_cross,
 ) = st.tabs(
     [
         "📈 Gráfico", "📋 Tabla", "🏆 Ranking por año", "🎬 Ranking animado",
         "🔮 Proyección", "⬇️ Descargas",
+        "💰 Análisis presupuestal",
         "🔍 Exploración (base adicional)", "🔀 Análisis cruzado",
     ]
 )
@@ -897,9 +957,6 @@ def render_site_analysis_chart(
     compact: bool = False,
     key_suffix: str = "",
     depts_override: list[str] | None = None,
-    local_event_year: int | None = None,
-    local_event_lag: int = 0,
-    local_breakpoint: bool = False,
 ) -> None:
     """Construye y renderiza el gráfico de una localización del tumor
     primario, con línea de tendencia, suavizado LOWESS, quiebre
@@ -916,18 +973,6 @@ def render_site_analysis_chart(
     `depts_override`, si se especifica, reemplaza la lista global de
     departamentos seleccionados (usado para el modo "un gráfico por
     departamento" — cada llamada solo dibuja un departamento a la vez).
-
-    `local_event_year`, si se especifica, evalúa el quiebre por evento
-    de forma independiente para ESTE gráfico (con su propio año y años
-    de implementación), en vez de usar la configuración global del
-    panel lateral — pensado para los gráficos adicionales, donde cada
-    uno puede corresponder a un evento distinto (p. ej. una norma que
-    aplicó en años diferentes por departamento).
-
-    `local_breakpoint`, si es True, activa la detección automática de
-    punto de quiebre para ESTE gráfico independientemente del switch
-    global del panel lateral (que sigue aplicando igual si está
-    activado; ambos se combinan con "o", no se excluyen).
     """
     depts_to_plot = depts_override if depts_override is not None else depts_selected
 
@@ -1027,12 +1072,8 @@ def render_site_analysis_chart(
 
     bp_summary = None
     bp_dept = None
-    if local_breakpoint or show_breakpoint:
-        if local_breakpoint and len(depts_to_plot) == 1:
-            # Activado localmente en este gráfico específico: siempre
-            # usa el único departamento que se está mostrando aquí.
-            bp_dept = depts_to_plot[0]
-        elif breakpoint_target and breakpoint_target in depts_to_plot:
+    if show_breakpoint:
+        if breakpoint_target and breakpoint_target in depts_to_plot:
             bp_dept = breakpoint_target
         elif len(depts_to_plot) == 1:
             # Un solo departamento en este gráfico: se usa como objetivo
@@ -1097,16 +1138,8 @@ def render_site_analysis_chart(
 
     arb_summary = None
     arb_dept = None
-    # Si se especifica un evento local (independiente por gráfico), tiene
-    # prioridad sobre la configuración global del panel lateral y siempre
-    # se evalúa para el único departamento de este gráfico.
-    effective_break_year = local_event_year if local_event_year is not None else arb_break_year
-    effective_lag = local_event_lag if local_event_year is not None else arb_lag
-    use_arb = (local_event_year is not None) or show_arbitrary_break
-    if use_arb and effective_break_year is not None:
-        if local_event_year is not None:
-            arb_dept = depts_to_plot[0] if len(depts_to_plot) == 1 else None
-        elif arb_target and arb_target in depts_to_plot:
+    if show_arbitrary_break and arb_break_year is not None:
+        if arb_target and arb_target in depts_to_plot:
             arb_dept = arb_target
         elif len(depts_to_plot) == 1:
             arb_dept = depts_to_plot[0]
@@ -1115,13 +1148,13 @@ def render_site_analysis_chart(
         arb = chow_test_arbitrary_break(
             sub_arb["Anio"].to_numpy(),
             sub_arb["Casos"].to_numpy(),
-            break_year=int(effective_break_year),
-            implementation_lag=int(effective_lag),
+            break_year=int(arb_break_year),
+            implementation_lag=int(arb_lag),
         )
         if arb is None:
             st.info(
-                f"No hay suficientes años antes/después de {int(effective_break_year)} "
-                f"(considerando {int(effective_lag)} año(s) de implementación) en "
+                f"No hay suficientes años antes/después de {int(arb_break_year)} "
+                f"(considerando {int(arb_lag)} año(s) de implementación) en "
                 f"**{arb_dept}** ({site_val}) para aplicar el test (se requieren al "
                 "menos 3 años a cada lado)."
             )
@@ -1267,19 +1300,7 @@ def render_site_analysis_chart(
 
 
 with tab_graph:
-    _local_bp_main = st.checkbox(
-        "🔍 Detectar punto de quiebre (cambio estructural) en este gráfico",
-        value=False, key="local_bp_main",
-        help=(
-            "Además del switch del panel lateral, actívalo aquí para forzar "
-            "la detección automática de quiebre en el gráfico principal sin "
-            "tener que ir a la barra lateral."
-        ),
-    )
-    render_site_analysis_chart(
-        site, filtered, compact=False, key_suffix="main",
-        local_breakpoint=_local_bp_main,
-    )
+    render_site_analysis_chart(site, filtered, compact=False, key_suffix="main")
 
     # -----------------------------------------------------------------
     # Gráficos adicionales: comparar simultáneamente otras localizaciones
@@ -1287,35 +1308,6 @@ with tab_graph:
     # por fila), con el mismo análisis estadístico y personalización de
     # colores que el gráfico principal.
     # -----------------------------------------------------------------
-    def _local_event_controls(widget_key: str) -> tuple[int | None, int]:
-        """Control de 'quiebre por evento' independiente para un gráfico
-        adicional específico — año y años de implementación propios,
-        sin depender de la configuración global del panel lateral."""
-        with st.expander("🏛️ Quiebre por evento en este gráfico", expanded=False):
-            _on = st.checkbox(
-                "Evaluar en este gráfico", value=False, key=f"local_evt_on_{widget_key}",
-            )
-            _yr, _lag = None, 0
-            if _on:
-                _yr = st.number_input(
-                    "Año del evento", min_value=year_min, max_value=year_max,
-                    value=min(max(year_min + 1, (year_min + year_max) // 2), year_max),
-                    step=1, key=f"local_evt_year_{widget_key}",
-                )
-                _lag = st.slider(
-                    "Años de implementación a excluir", 0, 5, 0,
-                    key=f"local_evt_lag_{widget_key}",
-                )
-        return (int(_yr) if _on else None), int(_lag)
-
-    def _local_breakpoint_control(widget_key: str) -> bool:
-        """Checkbox de detección automática de quiebre, independiente
-        para un gráfico adicional específico."""
-        return st.checkbox(
-            "🔍 Detectar punto de quiebre (cambio estructural) en este gráfico",
-            value=False, key=f"local_bp_{widget_key}",
-        )
-
     extra_sites_to_plot = [s for s in extra_sites if s != site]
     if show_extra_sites and extra_sites_to_plot:
         st.markdown("---")
@@ -1337,13 +1329,9 @@ with tab_graph:
                         if extra_frames
                         else pd.DataFrame(columns=["Anio", "Casos", "Departamento"])
                     )
-                    _local_bp_site = _local_breakpoint_control(f"site_{extra_site}")
-                    _le_year, _le_lag = _local_event_controls(f"site_{extra_site}")
                     render_site_analysis_chart(
                         extra_site, extra_filtered, compact=True,
                         key_suffix=f"extra_{extra_site}",
-                        local_event_year=_le_year, local_event_lag=_le_lag,
-                        local_breakpoint=_local_bp_site,
                     )
 
     # -----------------------------------------------------------------
@@ -1363,14 +1351,10 @@ with tab_graph:
                         one_dept, site, year_range[0], year_range[1]
                     ).copy()
                     dept_series["Departamento"] = one_dept
-                    _local_bp_dept = _local_breakpoint_control(f"dept_{one_dept}")
-                    _le_year, _le_lag = _local_event_controls(f"dept_{one_dept}")
                     render_site_analysis_chart(
                         site, dept_series, compact=True,
                         key_suffix=f"dept_{one_dept}",
                         depts_override=[one_dept],
-                        local_event_year=_le_year, local_event_lag=_le_lag,
-                        local_breakpoint=_local_bp_dept,
                     )
     elif show_dept_split and not dept_split_list:
         st.info(
@@ -1968,6 +1952,340 @@ with tab_downloads:
     )
 
 # ---------------------------------------------------------------------------
+# Análisis presupuestal (base nativa de ejecución presupuestal INEN)
+# ---------------------------------------------------------------------------
+# A diferencia de la "Base de datos adicional" genérica (CSV/Excel subido a
+# mano, con mapeo manual de columnas), esta pestaña está construida de forma
+# NATIVA sobre el archivo de ejecución presupuestal del INEN incluido en el
+# proyecto (budget_processing.py): un solo clic en el panel lateral basta
+# para cargarla, tanto aquí como en «🔀 Análisis cruzado».
+
+with tab_budget:
+    st.markdown("#### Análisis presupuestal — Ejecución del INEN")
+
+    if "budget_anual" not in st.session_state:
+        st.info(
+            "Aún no se ha cargado la base de ejecución presupuestal. Usa el "
+            "panel lateral → **💰 Ejecución presupuestal INEN (base nativa)** "
+            "y haz clic en «Cargar ejecución presupuestal INEN» (un solo "
+            "clic, no requiere subir ni mapear ningún archivo)."
+        )
+    else:
+        _bud_anual_full: pd.DataFrame = st.session_state["budget_anual"]
+        _bud_detalle_full: pd.DataFrame = st.session_state["budget_detalle"]
+
+        _by_lo, _by_hi = int(_bud_anual_full["Anio"].min()), int(_bud_anual_full["Anio"].max())
+        _by_range = st.slider(
+            "Rango de años (análisis presupuestal)",
+            min_value=_by_lo, max_value=_by_hi, value=(_by_lo, _by_hi), key="bp_year_range",
+        )
+        _ba_f = _bud_anual_full[
+            (_bud_anual_full["Anio"] >= _by_range[0]) & (_bud_anual_full["Anio"] <= _by_range[1])
+        ].sort_values("Anio").reset_index(drop=True)
+        _bd_f = _bud_detalle_full[
+            (_bud_detalle_full["Anio"] >= _by_range[0]) & (_bud_detalle_full["Anio"] <= _by_range[1])
+        ].copy()
+
+        st.caption(
+            f"Ejecución presupuestal nacional del INEN — todas las fuentes de "
+            f"financiamiento · {len(_ba_f)} año(s) · {_by_range[0]}–{_by_range[1]}"
+        )
+
+        # --- KPIs ---------------------------------------------------------
+        def _bp_delta(curr: float, prev: float | None) -> str | None:
+            if prev is None or pd.isna(prev) or pd.isna(curr) or prev == 0:
+                return None
+            return f"{(curr / prev - 1) * 100:+.1f}% vs año anterior"
+
+        def _bp_cagr(s: pd.Series) -> str:
+            _snn = s[s > 0].dropna()
+            if len(_snn) < 2:
+                return "s/d"
+            _n = _snn.index[-1] - _snn.index[0]
+            if _n <= 0 or _snn.iloc[0] <= 0:
+                return "s/d"
+            return f"{((_snn.iloc[-1] / _snn.iloc[0]) ** (1 / _n) - 1) * 100:+.1f}%/año"
+
+        _last_row = _ba_f.iloc[-1]
+        _prev_row = _ba_f.iloc[-2] if len(_ba_f) >= 2 else None
+        _mk_bud_kpi = (
+            mann_kendall_trend(_ba_f["Anio"].to_numpy(), _ba_f["Devengado"].to_numpy())
+            if len(_ba_f) >= 6 else None
+        )
+
+        _bk1, _bk2, _bk3, _bk4, _bk5 = st.columns(5)
+        _bk1.metric(
+            f"PIM {int(_last_row['Anio'])}", f"S/ {_last_row['PIM']:,.0f}",
+            _bp_delta(_last_row["PIM"], _prev_row["PIM"] if _prev_row is not None else None),
+        )
+        _bk2.metric(
+            f"Devengado {int(_last_row['Anio'])}", f"S/ {_last_row['Devengado']:,.0f}",
+            _bp_delta(_last_row["Devengado"], _prev_row["Devengado"] if _prev_row is not None else None),
+        )
+        _avance_last = _last_row["Avance_pct"]
+        _bk3.metric(
+            "Avance % (Devengado/PIM)",
+            f"{_avance_last * 100:,.1f}%" if pd.notna(_avance_last) else "s/d",
+        )
+        _bk4.metric(
+            "CAGR Devengado (período)",
+            _bp_cagr(_ba_f.set_index("Anio")["Devengado"]),
+        )
+        _bk5.metric(
+            "Tendencia Devengado (Mann-Kendall)",
+            _mk_bud_kpi.trend if _mk_bud_kpi else "s/d",
+            f"p={_mk_bud_kpi.p_value:.3f}" if _mk_bud_kpi else "",
+        )
+
+        st.divider()
+
+        # --- 1. Serie temporal PIA / PIM / Devengado / Girado --------------
+        st.markdown("##### 1. Evolución del presupuesto: PIA, PIM, Devengado y Girado")
+        _bp_cols_show = st.multiselect(
+            "Montos a graficar", options=MONTO_COLS, default=["PIM", "Devengado"],
+            key="bp_cols_show",
+        )
+        _bp_line_colors = {
+            "PIA": DEFAULT_PALETTE[2], "PIM": SECONDARY_COLOR, "Compromiso": "#8850c4",
+            "Devengado": PRIMARY_COLOR, "Girado": OK_COLOR,
+        }
+        _fig_bud = go.Figure()
+        for _bcol in _bp_cols_show:
+            _fig_bud.add_trace(go.Scatter(
+                x=_ba_f["Anio"], y=_ba_f[_bcol], mode="lines+markers",
+                name=_bcol, line=dict(width=2, color=_bp_line_colors.get(_bcol, PRIMARY_COLOR)),
+                marker=dict(size=5),
+            ))
+        _fig_bud.update_layout(
+            height=420, hovermode="x unified", yaxis_title="S/ (Soles)",
+            xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.25),
+            margin=dict(t=20),
+        )
+        st.plotly_chart(_fig_bud, use_container_width=True)
+
+        st.divider()
+
+        # --- 2. Porcentaje de avance de ejecución ---------------------------
+        st.markdown("##### 2. Porcentaje de avance de ejecución (Devengado / PIM)")
+        _ba_avance = _ba_f.dropna(subset=["Avance_pct"])
+        if _ba_avance.empty:
+            st.info("No hay datos de avance % calculables en el rango seleccionado.")
+        else:
+            _bar_colors_avance = [
+                OK_COLOR if v >= 0.9 else WARN_COLOR if v >= 0.7 else BAD_COLOR
+                for v in _ba_avance["Avance_pct"]
+            ]
+            _fig_avance = go.Figure()
+            _fig_avance.add_trace(go.Bar(
+                x=_ba_avance["Anio"], y=_ba_avance["Avance_pct"] * 100,
+                marker_color=_bar_colors_avance, name="Avance %",
+            ))
+            _fig_avance.add_hline(
+                y=90, line_dash="dot", line_color="gray", annotation_text="Meta referencial: 90%",
+            )
+            _fig_avance.update_layout(
+                height=320, yaxis_title="Avance % (Devengado/PIM)",
+                xaxis=dict(dtick=1, tickangle=-45), margin=dict(t=20), showlegend=False,
+            )
+            st.plotly_chart(_fig_avance, use_container_width=True)
+            st.caption(
+                "Verde ≥ 90% de ejecución · Ámbar 70–90% · Rojo < 70%. "
+                "Años con PIM ≤ 0 u otras inconsistencias presupuestales de "
+                "origen (ej. créditos suplementarios negativos) pueden mostrar "
+                "porcentajes atípicos y se excluyen de este gráfico."
+            )
+
+        st.divider()
+
+        # --- 3. Desagregación por fuente de financiamiento -----------------
+        st.markdown("##### 3. Ejecución (Devengado) por fuente de financiamiento")
+        _fuentes = sorted(_bd_f["Fuente"].unique().tolist())
+        _fig_fuente = go.Figure()
+        for _fi, _fuente in enumerate(_fuentes):
+            _fsub = _bd_f[_bd_f["Fuente"] == _fuente].sort_values("Anio")
+            _fig_fuente.add_trace(go.Bar(
+                x=_fsub["Anio"], y=_fsub["Devengado"], name=_fuente,
+                marker_color=DEFAULT_PALETTE[_fi % len(DEFAULT_PALETTE)],
+            ))
+        _fig_fuente.update_layout(
+            height=420, barmode="stack", yaxis_title="Devengado (S/)",
+            xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.3),
+            margin=dict(t=20),
+        )
+        st.plotly_chart(_fig_fuente, use_container_width=True)
+
+        _last_year_bd = _bd_f[_bd_f["Anio"] == _bd_f["Anio"].max()].sort_values("Devengado", ascending=True)
+        if not _last_year_bd.empty:
+            _fig_share = go.Figure(go.Bar(
+                x=_last_year_bd["Devengado"], y=_last_year_bd["Fuente"], orientation="h",
+                marker_color=PRIMARY_COLOR,
+                text=[f"{v:,.0f} ({v / _last_year_bd['Devengado'].sum() * 100:.1f}%)" for v in _last_year_bd["Devengado"]],
+                textposition="outside",
+            ))
+            _fig_share.update_layout(
+                height=160 + 40 * len(_last_year_bd),
+                title=dict(text=f"Participación por fuente — {int(_bd_f['Anio'].max())}", font=dict(size=13)),
+                xaxis_title="Devengado (S/)", margin=dict(t=35, l=10), showlegend=False,
+            )
+            st.plotly_chart(_fig_share, use_container_width=True)
+
+        st.divider()
+
+        # --- 4. Tendencia y quiebre estructural ------------------------------
+        st.markdown("##### 4. Tendencia y quiebre estructural")
+        _bp_metric = st.selectbox(
+            "Variable para el análisis de tendencia / quiebre",
+            options=MONTO_COLS, index=MONTO_COLS.index("Devengado"), key="bp_stat_metric",
+            format_func=lambda c: MONTO_LABELS.get(c, c),
+        )
+        _ts_bud = _ba_f.set_index("Anio")[_bp_metric].dropna()
+
+        if len(_ts_bud) < 6:
+            st.info("Se necesitan al menos 6 años en el rango seleccionado para este análisis.")
+        else:
+            _mk_bud = mann_kendall_trend(_ts_bud.index.to_numpy(), _ts_bud.to_numpy())
+            _bt1, _bt2, _bt3 = st.columns(3)
+            _bt1.metric("Tendencia (Mann-Kendall)", _mk_bud.trend if _mk_bud else "s/d")
+            _bt2.metric(
+                "p-valor", f"{_mk_bud.p_value:.4f}" if _mk_bud else "s/d",
+                significance_label(_mk_bud.p_value) if _mk_bud else "",
+            )
+            _bt3.metric("Pendiente de Sen (S//año)", f"{_mk_bud.sen_slope:,.0f}" if _mk_bud else "s/d")
+
+            _trend_lin_bud = linear_trend(_ts_bud.index.to_numpy(), _ts_bud.to_numpy())
+            _fig_trend_bud = go.Figure()
+            _fig_trend_bud.add_trace(go.Scatter(
+                x=_ts_bud.index, y=_ts_bud.values, mode="lines+markers", name=_bp_metric,
+                line=dict(width=2, color=PRIMARY_COLOR), marker=dict(size=5),
+            ))
+            if _trend_lin_bud is not None:
+                _fig_trend_bud.add_trace(go.Scatter(
+                    x=_trend_lin_bud.x, y=_trend_lin_bud.y_pred, mode="lines",
+                    name=f"Tendencia lineal (R²={_trend_lin_bud.r2:.2f})",
+                    line=dict(width=2, color=SECONDARY_COLOR, dash="dash"),
+                ))
+            _fig_trend_bud.update_layout(
+                height=320, hovermode="x unified", yaxis_title="S/ (Soles)",
+                xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.3),
+                margin=dict(t=20),
+            )
+            st.plotly_chart(_fig_trend_bud, use_container_width=True)
+
+            with st.expander("🔍 Detección automática de punto de quiebre (cambio estructural)"):
+                _auto_bud = detect_breakpoint(_ts_bud.index.to_numpy(), _ts_bud.to_numpy())
+                if _auto_bud is None:
+                    st.info("No se pudo estimar un punto de quiebre con los datos disponibles.")
+                else:
+                    _ab1, _ab2, _ab3 = st.columns(3)
+                    _ab1.metric("Año de quiebre detectado", f"{_auto_bud.year}")
+                    _ab2.metric(
+                        "p-valor (test de Chow)", f"{_auto_bud.p_value:.4f}",
+                        significance_label(_auto_bud.p_value),
+                    )
+                    _ab3.metric(
+                        "Pendiente antes → después",
+                        f"{_auto_bud.slope_before:,.0f} → {_auto_bud.slope_after:,.0f}",
+                    )
+                    _fig_ab_bud = go.Figure()
+                    _fig_ab_bud.add_trace(go.Scatter(x=_ts_bud.index, y=_ts_bud.values, mode="markers", name="Observado", marker=dict(color=PRIMARY_COLOR, size=6)))
+                    _fig_ab_bud.add_trace(go.Scatter(x=_auto_bud.x_before, y=_auto_bud.y_pred_before, mode="lines", name="Ajuste antes", line=dict(color=SECONDARY_COLOR, width=2)))
+                    _fig_ab_bud.add_trace(go.Scatter(x=_auto_bud.x_after, y=_auto_bud.y_pred_after, mode="lines", name="Ajuste después", line=dict(color=OK_COLOR, width=2)))
+                    _fig_ab_bud.add_vline(x=_auto_bud.year, line_dash="dot", line_color="gray")
+                    _fig_ab_bud.update_layout(height=320, hovermode="x unified", yaxis_title="S/ (Soles)", margin=dict(t=20), xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.3))
+                    st.plotly_chart(_fig_ab_bud, use_container_width=True)
+
+        st.divider()
+
+        # --- 5. Proyección ----------------------------------------------------
+        st.markdown("##### 5. Proyección de la ejecución presupuestal")
+        _proj_bud_metric = st.selectbox(
+            "Variable a proyectar", options=MONTO_COLS, index=MONTO_COLS.index("Devengado"),
+            key="bp_proj_metric", format_func=lambda c: MONTO_LABELS.get(c, c),
+        )
+        _proj_bud_horizon = st.slider("Años a proyectar", 1, 10, 5, key="bp_proj_horizon")
+        _ts_proj_bud = _bud_anual_full.set_index("Anio")[_proj_bud_metric].dropna()
+        _proj_bud = project_series(
+            _ts_proj_bud.index.to_numpy(), _ts_proj_bud.to_numpy(), horizon=_proj_bud_horizon,
+        )
+        if _proj_bud is None:
+            st.warning("No hay suficientes años con datos para proyectar (se requieren al menos 6).")
+        else:
+            st.caption(_proj_bud.method_note)
+            _fig_proj_bud = go.Figure()
+            _fig_proj_bud.add_trace(go.Scatter(x=_proj_bud.years_hist, y=_proj_bud.values_hist, name="Histórico", mode="lines+markers", line=dict(width=2.5, color=ACCENT_COLOR)))
+            _fig_proj_bud.add_trace(go.Scatter(
+                x=np.concatenate([_proj_bud.years_future, _proj_bud.years_future[::-1]]),
+                y=np.concatenate([_proj_bud.recommended_upper, _proj_bud.recommended_lower[::-1]]),
+                fill="toself", fillcolor="rgba(47,111,168,0.15)", line=dict(color="rgba(0,0,0,0)"),
+                name="Banda de incertidumbre (90%)", hoverinfo="skip",
+            ))
+            _fig_proj_bud.add_trace(go.Scatter(x=_proj_bud.years_future, y=_proj_bud.recommended, name="Recomendado (Holt amortiguado)", mode="lines+markers", line=dict(width=2.5, color=SECONDARY_COLOR)))
+            _fig_proj_bud.add_trace(go.Scatter(x=_proj_bud.years_future, y=_proj_bud.conservative, name="Conservador (promedio reciente, plano)", mode="lines", line=dict(width=2, color="#7d7d7d", dash="dot")))
+            _fig_proj_bud.add_trace(go.Scatter(x=_proj_bud.years_future, y=_proj_bud.optimistic, name="Lineal (pendiente de Sen, sin amortiguar)", mode="lines", line=dict(width=2, color="#c94141", dash="dash")))
+            _fig_proj_bud.update_layout(height=420, hovermode="x unified", yaxis_title="S/ (Soles)", xaxis=dict(dtick=1, tickangle=-45), legend=dict(orientation="h", y=-0.3), margin=dict(t=20))
+            st.plotly_chart(_fig_proj_bud, use_container_width=True)
+
+        st.divider()
+
+        # --- 6. Personalizar la métrica activa en Análisis cruzado ------------
+        st.markdown("##### 🔀 Métrica activa para «Análisis cruzado»")
+        st.caption(
+            "Elige qué variable presupuestal se compara contra los casos de "
+            "cáncer en la pestaña **🔀 Análisis cruzado**. Por defecto se usa "
+            "el Devengado (ejecución real del gasto)."
+        )
+        _cx_metric_sel = st.selectbox(
+            "Variable para el análisis cruzado", options=MONTO_COLS,
+            index=MONTO_COLS.index("Devengado"), key="bp_cross_metric",
+            format_func=lambda c: MONTO_LABELS.get(c, c),
+        )
+        if st.button("🔁 Usar esta variable en Análisis cruzado", key="btn_bp_apply_cross"):
+            _ba_idx = _bud_anual_full.set_index("Anio")
+            st.session_state["secondary_serie"] = _ba_idx[_cx_metric_sel]
+            st.session_state["secondary_label"] = f"Ejecución presupuestal INEN — {_cx_metric_sel}"
+            st.session_state["secondary_units"] = "S/ (Soles)"
+            st.session_state["secondary_cols_dict"] = {
+                c: _ba_idx[c] for c in MONTO_COLS
+            }
+            st.session_state["secondary_val_cols"] = list(MONTO_COLS)
+            st.success(
+                f"✓ «{MONTO_LABELS.get(_cx_metric_sel, _cx_metric_sel)}» ahora es la "
+                "serie activa en Análisis cruzado."
+            )
+
+        st.divider()
+
+        # --- 7. Tablas y descargas ---------------------------------------------
+        st.markdown("##### 📋 Datos")
+        with st.expander("Ver tabla anual (nacional, todas las fuentes)"):
+            st.dataframe(
+                _ba_f.style.format({
+                    "PIA": "{:,.0f}", "PIM": "{:,.0f}", "Compromiso": "{:,.0f}",
+                    "Devengado": "{:,.0f}", "Girado": "{:,.0f}", "Avance_pct": "{:.1%}",
+                }),
+                use_container_width=True,
+            )
+        with st.expander("Ver detalle por fuente de financiamiento"):
+            st.dataframe(
+                _bd_f.style.format({
+                    "PIA": "{:,.0f}", "PIM": "{:,.0f}", "Compromiso": "{:,.0f}",
+                    "Devengado": "{:,.0f}", "Girado": "{:,.0f}",
+                    "Avance_pct_pim": "{:.1%}", "Avance_pct_mef": "{:.1%}",
+                }),
+                use_container_width=True,
+            )
+
+        _dlb1, _dlb2 = st.columns(2)
+        _dlb1.download_button(
+            "⬇️ Descargar serie anual (CSV)", _ba_f.to_csv(index=False).encode("utf-8"),
+            file_name="ejecucion_presupuestal_inen_anual.csv", mime="text/csv", key="dl_bp_anual",
+        )
+        _dlb2.download_button(
+            "⬇️ Descargar detalle por fuente (CSV)", _bd_f.to_csv(index=False).encode("utf-8"),
+            file_name="ejecucion_presupuestal_inen_detalle_fuente.csv", mime="text/csv", key="dl_bp_detalle",
+        )
+
+# ---------------------------------------------------------------------------
 # Exploración (base adicional) y Análisis cruzado
 # ---------------------------------------------------------------------------
 # Adaptados del dashboard hermano "Observatorio del Financiamiento
@@ -1976,10 +2294,6 @@ with tab_downloads:
 # dashboard hermano no aplica; en su lugar se reutilizan las mismas
 # herramientas estadísticas ya presentes en este dashboard — tendencia
 # lineal, quiebre automático, Mann-Kendall, LOWESS).
-
-OK_COLOR = "#3ba776"
-WARN_COLOR = "#c9a13b"
-BAD_COLOR = "#c94141"
 
 with tab_explore_sec:
     st.markdown("#### Exploración de la base de datos adicional")
@@ -2267,8 +2581,10 @@ with tab_cross:
 
     if "secondary_serie" not in st.session_state:
         st.info(
-            "Carga una base de datos adicional desde el panel lateral "
-            "(📊 **Base de datos adicional**) para habilitar este análisis."
+            "Carga una base de datos adicional desde el panel lateral para "
+            "habilitar este análisis: usa **💰 Ejecución presupuestal INEN "
+            "(base nativa)** con un solo clic, o sube tu propia serie en "
+            "**📊 Base de datos adicional**."
         )
     else:
         _sec_s_x: pd.Series = st.session_state["secondary_serie"]

@@ -7,4 +7,3 @@ pymannkendall>=1.4.3
 statsmodels>=0.14
 matplotlib>=3.8
 imageio>=2.34
-

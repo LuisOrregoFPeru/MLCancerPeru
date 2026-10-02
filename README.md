@@ -4,12 +4,15 @@ Dashboard interactivo en **Streamlit**, inspirado en el visor
 [*Cancer Over Time*](https://gco.iarc.who.int) de GLOBOCAN/IARC, construido
 sobre los datos de casos registrados por el **INEN** (Instituto Nacional de
 Enfermedades Neoplásicas) para los 25 departamentos del Perú + el total nacional,
-2000–2024.
+2000–2024 (o más años, según la última actualización de datos).
 
 ## ✨ Funcionalidades
 
 - Selección de **localización del tumor primario** y **departamento(s) de residencia** a comparar (hasta 10 a la vez) — la tarjeta de resumen muestra los nombres de los departamentos seleccionados, no solo la cantidad.
+- **Gráficos adicionales por localización**: opción para agregar hasta 6 localizaciones más y verlas cada una en su propio gráfico compacto (2 por fila), con exactamente el mismo análisis estadístico (tendencia, quiebre automático, quiebre por evento, Mann-Kendall, suavizado) y la misma personalización de colores que el gráfico principal. También se generan proyecciones adicionales para cada una, en el mismo formato compacto.
+- **Comparar varios departamentos (gráficos adicionales)**: análogo al anterior pero por departamento — con su propio multiselect independiente ("Departamentos adicionales a mostrar", misma estructura que el de localizaciones), muestra un gráfico separado por cada departamento elegido ahí para la localización principal, en vez de mezclarlos como líneas en un solo gráfico. Útil cuando un departamento grande como Lima o Perú aplasta visualmente a uno más pequeño en la escala combinada. También comparte el mismo análisis estadístico y personalización de colores.
 - **Comparación de periodos personalizable**: elige tú mismo el año base y el año de comparación para la tarjeta de variación (%).
+- **Excluir departamentos del total nacional (Perú)**: si tu fuente de datos incluye un departamento como "Extranjero" (pacientes con residencia fuera del país), puedes excluirlo del total de "Perú (Total nacional)" sin tener que quitarlo del dataset — el ajuste se aplica en el gráfico, KPIs, ranking, Mann-Kendall y quiebres cuando el departamento analizado es Perú.
 - Rango de años ajustable con slider.
 - Gráfico de **líneas o barras** (Plotly, interactivo: zoom, hover, exportar como PNG).
 - Eje X mostrando **todos los años** disponibles (no solo algunos ticks).
@@ -31,6 +34,18 @@ Enfermedades Neoplásicas) para los 25 departamentos del Perú + el total nacion
   (gráfico de barras horizontales ordenado, con matices del mismo color
   y el puesto de cada una — 1°, 2°, 3°... — al estilo del ranking por
   país de GLOBOCAN).
+- **Ranking animado**: pestaña que muestra cómo cambia el ranking de
+  localizaciones año a año ("bar chart race"), con reproducción
+  interactiva (botones debajo del gráfico, control de velocidad, año
+  destacado arriba a la derecha), exclusión de departamento propia de
+  esta pestaña (ej. Extranjero) y descarga como GIF.
+- **Base de datos adicional (serie temporal)**: sube cualquier serie externa
+  (CSV/Excel, por año) para explorarla de forma independiente en
+  "🔍 Exploración (base adicional)" (KPIs, distribución, tendencia,
+  detección de quiebre) y compararla contra los casos de cáncer en
+  "🔀 Análisis cruzado" (comparación normalizada, correlación de Pearson/
+  Spearman, y correlación cruzada con rezago para ver si una serie
+  anticipa a la otra).
 - **Panel de KPI**: además de la variación % entre dos años elegibles por
   el usuario, muestra cambio absoluto, CAGR (crecimiento anual compuesto),
   año pico y un resumen de tendencia (Mann-Kendall) de un vistazo.
@@ -143,7 +158,7 @@ haz `git commit` + `git push`. La app reconstruirá la caché automáticamente.
   nacional total (el INEN es un centro de referencia oncológica, no cubre el
   100% de los casos diagnosticados en el país) ni tasas estandarizadas por
   edad — a diferencia de GLOBOCAN, que sí reporta ASR (Age-Standardized Rate).
-- Años cubiertos: 2000–2023 (ampliable, ver sección "Incorporar datos recientes").
+- Años cubiertos: 2000–2024 al momento de escribir esto (ampliable, ver sección "Incorporar datos recientes"). El subtítulo del panel se calcula automáticamente a partir del dataset, así que no hace falta editar código al agregar años nuevos.
 
 ## 📐 Análisis de punto de quiebre — metodología
 
@@ -212,6 +227,56 @@ inmediatamente después (periodo en que el efecto aún no se consolida), y
 aplica el mismo test de Chow que la detección automática, pero anclado al
 año que el usuario define.
 
+## 🎬 Ranking animado — cómo funciona
+
+La pestaña "Ranking animado" construye un "bar chart race": para cada año
+del rango seleccionado calcula el top N de localizaciones (usando la misma
+función `get_year_ranking()` que la pestaña "Ranking por año", así que
+respeta igual las exclusiones configuradas), fija un conjunto de
+"candidatos" (la unión de los que aparecieron en el top N en algún año del
+rango) para que el eje de casos se mantenga en una escala estable durante
+toda la animación, y genera:
+
+- Una **animación interactiva de Plotly** (botones reproducir/pausar +
+  control deslizante por año), cuya velocidad se controla con el slider
+  "segundos por año" antes de generarla.
+- Un **GIF descargable** con matplotlib + imageio (dependencias puras en
+  Python, sin necesitar `ffmpeg` a nivel de sistema, para que funcione sin
+  configuración adicional en Streamlit Community Cloud). Si estas
+  librerías no están instaladas en el entorno, la animación interactiva
+  sigue funcionando igual y solo se oculta el botón de descarga.
+
+## 🔍🔀 Base de datos adicional, Exploración y Análisis cruzado
+
+Estas dos pestañas están adaptadas del dashboard hermano **Observatorio del
+Financiamiento Oncológico INEN** (que trabaja con series mensuales de gasto
+y puntos de corte normativos) a la granularidad **anual** de este proyecto:
+no es una copia literal, sino la misma idea reimplementada con las
+herramientas estadísticas que ya existen aquí (tendencia lineal, quiebre
+automático por test de Chow, Mann-Kendall, LOWESS) — sin el concepto de
+"normas"/puntos de corte regulatorios, que no aplica a datos de casos de
+cáncer.
+
+**Cómo cargar una base adicional**: en el panel lateral, expande
+"📊 Base de datos adicional (serie temporal)", sube un CSV o Excel con al
+menos una columna de año (o fecha) y una columna numérica. Si la fuente
+trae más de una fila por año (p. ej. datos mensuales), se agrega
+automáticamente a nivel de año (suma o promedio, a elección) para poder
+compararla con los casos de cáncer.
+
+**"🔍 Exploración"**: KPIs (total, promedio, variación, CAGR, año pico,
+Mann-Kendall), estadísticas descriptivas, histogramas de distribución,
+gráfico principal con LOWESS opcional, análisis de tendencia detallado por
+columna, y detección automática de punto de quiebre — todo igual que como
+ya funciona en el resto del dashboard, aplicado a la serie que subas.
+
+**"🔀 Análisis cruzado"**: alinea la serie adicional con los casos de
+cáncer de tu selección actual (localización + departamentos + exclusiones)
+en los años que ambas tienen en común, y muestra: comparación normalizada
+(índice = 100 en el primer año), correlación contemporánea (Pearson y
+Spearman, con scatter coloreado cronológicamente), y correlación cruzada
+con rezago (lead-lag) para ver si una serie anticipa o sigue a la otra.
+
 ## 🛠️ Stack técnico
 
-Python · [Streamlit](https://streamlit.io) · [Plotly](https://plotly.com/python/) · Pandas · SciPy (test de Chow) · [pymannkendall](https://pypi.org/project/pymannkendall/) · [statsmodels](https://www.statsmodels.org/) (Holt damped trend)
+Python · [Streamlit](https://streamlit.io) · [Plotly](https://plotly.com/python/) · Pandas · SciPy (test de Chow) · [pymannkendall](https://pypi.org/project/pymannkendall/) · [statsmodels](https://www.statsmodels.org/) (Holt damped trend) · matplotlib + imageio (GIF del ranking animado)
