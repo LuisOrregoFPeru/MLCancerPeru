@@ -1,4 +1,4 @@
- """
+"""
 Dashboard "Cáncer en el Tiempo — Perú (INEN)"
 ==============================================
 Inspirado en el visor "Cancer Over Time" de GLOBOCAN/IARC, construido
@@ -2802,10 +2802,10 @@ _cite_url = "https://mlcancerperu.streamlit.app"
 st.markdown(
     f"""<div class="citation-box">
 <h4>REFERENCIA WEB (formato AMA)</h4>
-<p>Orrego-Ferreyros LA. Cáncer en el Tiempo — Perú: Casos Registrados por el INEN.
+<p>Orrego-Ferreyros LA. Cáncer en el Tiempo — Perú: Casos Nuevos Registrados por el INEN.
 Instituto Nacional de Enfermedades Neoplásicas. Published {_cite_year}. Accessed [Mes Día, Año]. {_cite_url}</p>
 <h4>WEB REFERENCE (AMA format)</h4>
-<p>Orrego-Ferreyros LA. Cancer Over Time — Peru: Cases Registered by INEN. National Institute
+<p>Orrego-Ferreyros LA. Cancer Over Time — Peru: New Cases Registered by INEN. National Institute
 of Neoplastic Diseases. Published {_cite_year}. Accessed [Month Day, Year]. {_cite_url}</p>
 </div>""",
     unsafe_allow_html=True,
@@ -2835,7 +2835,7 @@ _endnote_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <xml><records><record>
 <ref-type name="Web Page">12</ref-type>
 <contributors><authors><author>Orrego-Ferreyros, Luis Alexander</author></authors></contributors>
-<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Nuevos Registrados por el INEN / Cancer Over Time \u2014 Peru: New Cases Registered by INEN</title></titles>
+<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Registrados por el INEN / Cancer Over Time \u2014 Peru: Cases Registered by INEN</title></titles>
 <dates><year>{_cite_year}</year></dates>
 <publisher>Instituto Nacional de Enfermedades Neopl\u00e1sicas</publisher>
 <urls><related-urls><url>{_cite_url}</url></related-urls></urls>
