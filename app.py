@@ -1,4 +1,4 @@
-"""
+ """
 Dashboard "Cáncer en el Tiempo — Perú (INEN)"
 ==============================================
 Inspirado en el visor "Cancer Over Time" de GLOBOCAN/IARC, construido
@@ -2835,7 +2835,7 @@ _endnote_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <xml><records><record>
 <ref-type name="Web Page">12</ref-type>
 <contributors><authors><author>Orrego-Ferreyros, Luis Alexander</author></authors></contributors>
-<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Registrados por el INEN / Cancer Over Time \u2014 Peru: Cases Registered by INEN</title></titles>
+<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Nuevos Registrados por el INEN / Cancer Over Time \u2014 Peru: New Cases Registered by INEN</title></titles>
 <dates><year>{_cite_year}</year></dates>
 <publisher>Instituto Nacional de Enfermedades Neopl\u00e1sicas</publisher>
 <urls><related-urls><url>{_cite_url}</url></related-urls></urls>
