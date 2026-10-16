@@ -2814,8 +2814,8 @@ of Neoplastic Diseases. Published {_cite_year}. Accessed [Month Day, Year]. {_ci
 _ris_content = (
     "TY  - ELEC\n"
     "AU  - Orrego-Ferreyros, Luis Alexander\n"
-    "TI  - Cáncer en el Tiempo — Perú: Casos Registrados por el INEN / "
-    "Cancer Over Time — Peru: Cases Registered by INEN\n"
+    "TI  - Cáncer en el Tiempo — Perú: Casos Nuevos Registrados por el INEN / "
+    "Cancer Over Time — Peru: New Cases Registered by INEN\n"
     f"PY  - {_cite_year}\n"
     "PB  - Instituto Nacional de Enfermedades Neoplásicas\n"
     f"UR  - {_cite_url}\n"
@@ -2824,8 +2824,8 @@ _ris_content = (
 _bib_content = (
     f"@misc{{orregoferreyros{_cite_year}cancerentiempo,\n"
     "  author = {Orrego-Ferreyros, Luis Alexander},\n"
-    "  title = {C{\\'a}ncer en el Tiempo --- Per{\\'u}: Casos Registrados por el INEN "
-    "/ Cancer Over Time --- Peru: Cases Registered by INEN},\n"
+    "  title = {C{\\'a}ncer en el Tiempo --- Per{\\'u}: Casos Nuevos Registrados por el INEN "
+    "/ Cancer Over Time --- Peru: New Cases Registered by INEN},\n"
     f"  year = {{{_cite_year}}},\n"
     "  publisher = {Instituto Nacional de Enfermedades Neopl{\\'a}sicas},\n"
     f"  url = {{{_cite_url}}}\n"
@@ -2835,7 +2835,7 @@ _endnote_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <xml><records><record>
 <ref-type name="Web Page">12</ref-type>
 <contributors><authors><author>Orrego-Ferreyros, Luis Alexander</author></authors></contributors>
-<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Registrados por el INEN / Cancer Over Time \u2014 Peru: Cases Registered by INEN</title></titles>
+<titles><title>C\u00e1ncer en el Tiempo \u2014 Per\u00fa: Casos Nuevos Registrados por el INEN / Cancer Over Time \u2014 Peru: New Cases Registered by INEN</title></titles>
 <dates><year>{_cite_year}</year></dates>
 <publisher>Instituto Nacional de Enfermedades Neopl\u00e1sicas</publisher>
 <urls><related-urls><url>{_cite_url}</url></related-urls></urls>
