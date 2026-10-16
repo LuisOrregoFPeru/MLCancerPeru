@@ -47,8 +47,13 @@ Enfermedades Neoplásicas) para los 25 departamentos del Perú + el total nacion
   Spearman, y correlación cruzada con rezago para ver si una serie
   anticipa a la otra).
 - **Panel de KPI**: además de la variación % entre dos años elegibles por
-  el usuario, muestra cambio absoluto, CAGR (crecimiento anual compuesto),
-  año pico y un resumen de tendencia (Mann-Kendall) de un vistazo.
+  el usuario, muestra cambio absoluto, año pico y un resumen de tendencia
+  (Mann-Kendall). Una segunda fila compara tres tasas de crecimiento sobre
+  la misma ventana: CAGR (solo extremos), pendiente de Sen (casos/año,
+  robusta a atípicos) y APC por regresión log-lineal estilo Joinpoint
+  (%/año con IC95%), estas dos últimas calculadas con todos los años.
+  Los p-valores se muestran con 3 decimales y como p < 0.001 cuando
+  corresponde.
 - **Quiebre en un año específico (evento)**: a diferencia de la detección
   automática, permite indicar el año exacto de un evento (una ley, la
   apertura de un hospital oncológico, etc.) y aplica el test de Chow ahí

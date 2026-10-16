@@ -38,7 +38,10 @@ from data_processing import (
 from stats_analysis import (
     chow_test_arbitrary_break,
     detect_breakpoint,
+    format_p,
+    format_p_value,
     linear_trend,
+    log_linear_apc,
     mann_kendall_trend,
     project_series,
     significance_label,
@@ -902,7 +905,24 @@ else:
 
 mk_kpi = mann_kendall_trend(year_series.index.to_numpy(), year_series.to_numpy())
 
-kcol1, kcol2, kcol3, kcol4, kcol5 = st.columns(5)
+# Los "delta" de estas tarjetas son texto informativo (p-valor, IC, periodo):
+# se oculta la flecha si la versión de Streamlit lo permite.
+import inspect as _inspect
+_NO_ARROW = (
+    {"delta_arrow": "off"}
+    if "delta_arrow" in _inspect.signature(st.metric).parameters
+    else {}
+)
+
+# Tasas de crecimiento sobre la MISMA ventana que el CAGR (año base → año a
+# comparar), para que las tres sean comparables entre sí. A diferencia del
+# CAGR, la pendiente de Sen y el APC usan todos los años de la ventana.
+_win_lo, _win_hi = sorted((year_a, year_b))
+_win_series = year_series[(year_series.index >= _win_lo) & (year_series.index <= _win_hi)]
+mk_win = mann_kendall_trend(_win_series.index.to_numpy(), _win_series.to_numpy(), min_obs=3)
+apc_win = log_linear_apc(_win_series.index.to_numpy(), _win_series.to_numpy())
+
+kcol1, kcol2, kcol3, kcol4 = st.columns(4)
 kcol1.metric(
     f"Variación {year_a} → {year_b}",
     f"{delta_pct:+.1f}%" if pd.notna(delta_pct) else "s/d",
@@ -912,10 +932,6 @@ kcol2.metric(
     f"{delta_abs:+,.0f} casos" if pd.notna(delta_abs) else "s/d",
 )
 kcol3.metric(
-    "CAGR (crec. anual compuesto)",
-    f"{cagr * 100:+.1f}%/año" if pd.notna(cagr) else "s/d",
-)
-kcol4.metric(
     "Año pico",
     f"{peak_year} · {peak_val:,.0f}" if peak_year is not None else "s/d",
 )
@@ -925,14 +941,66 @@ if mk_kpi is not None:
         "decreasing": "📉 Decreciente",
         "no trend": "➖ Sin tendencia",
     }.get(mk_kpi.trend, mk_kpi.trend)
-    kcol5.metric(
+    kcol4.metric(
         "Tendencia (Mann-Kendall)",
         trend_icon,
-        delta=f"p = {mk_kpi.p_value:.3f}",
+        delta=format_p(mk_kpi.p_value),
         delta_color="off",
+        **_NO_ARROW,
+        help=(
+            "Test de Mann-Kendall corregido por autocorrelación sobre todo el "
+            f"periodo filtrado ({int(year_series.index.min())}–{int(year_series.index.max())}). "
+            f"Método: {mk_kpi.method}."
+        ),
     )
 else:
-    kcol5.metric("Tendencia (Mann-Kendall)", "s/d")
+    kcol4.metric("Tendencia (Mann-Kendall)", "s/d")
+
+gcol1, gcol2, gcol3 = st.columns(3)
+gcol1.metric(
+    "CAGR (crec. anual compuesto)",
+    f"{cagr * 100:+.1f}%/año" if pd.notna(cagr) else "s/d",
+    delta=f"solo extremos {year_a} y {year_b}",
+    delta_color="off",
+    **_NO_ARROW,
+    help=(
+        "Tasa constante que lleva del valor del año base al del año a comparar: "
+        "(final/inicial)^(1/n) − 1. Usa solo los dos extremos, por lo que es "
+        "sensible a la elección de años."
+    ),
+)
+gcol2.metric(
+    "Pendiente de Sen",
+    f"{mk_win.sen_slope:+,.0f} casos/año" if mk_win is not None else "s/d",
+    delta=(
+        f"{_win_lo}–{_win_hi} · {format_p(mk_win.p_value)}" if mk_win is not None else None
+    ),
+    delta_color="off",
+    **_NO_ARROW,
+    help=(
+        "Mediana de las pendientes entre todos los pares de años de la ventana. "
+        "Estimador robusto a valores atípicos (p. ej. 2020) y pareja natural del "
+        "test de Mann-Kendall. Se expresa en casos/año (cambio absoluto). "
+        "Requiere al menos 3 años."
+    ),
+)
+gcol3.metric(
+    "APC (regresión log-lineal)",
+    f"{apc_win.apc:+.1f}%/año" if apc_win is not None else "s/d",
+    delta=(
+        f"IC95% {apc_win.ci_low:+.1f} a {apc_win.ci_high:+.1f} · {format_p(apc_win.p_value)}"
+        if apc_win is not None
+        else None
+    ),
+    delta_color="off",
+    **_NO_ARROW,
+    help=(
+        "Cambio porcentual anual estimado con ln(casos) = a + b·año sobre todos los "
+        "años de la ventana: APC = (e^b − 1) × 100, como en Joinpoint (NCI) para un "
+        "solo tramo. A diferencia del CAGR no depende solo de los extremos. Asume "
+        "errores independientes; con autocorrelación el IC puede ser algo estrecho."
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Gráfico principal (equivalente al "Graphic" tab de GLOBOCAN)
@@ -1233,7 +1301,7 @@ def render_site_analysis_chart(
         summary_blocks.append(
             f"**📐 Punto de quiebre estimado para {bp_dept} ({site_val}): "
             f"año {bp_summary.year}** — el cambio de tendencia es {sig_txt} "
-            f"(test de Chow: F = {bp_summary.f_stat:.2f}, p = {bp_summary.p_value:.4f}). "
+            f"(test de Chow: F = {bp_summary.f_stat:.2f}, {format_p(bp_summary.p_value)}). "
             f"Pendiente antes: {bp_summary.slope_before:+.1f} casos/año · "
             f"pendiente después: {bp_summary.slope_after:+.1f} casos/año."
         )
@@ -1251,7 +1319,7 @@ def render_site_analysis_chart(
         summary_blocks.append(
             f"**🧪 Mann-Kendall para {mk_dept} ({site_val}, "
             f"{mk_year_range[0]}–{mk_year_range[1]}): tendencia {trend_es}** — {sig_txt} "
-            f"(z = {mk_summary.z_stat:.2f}, p = {mk_summary.p_value:.4f}, "
+            f"(z = {mk_summary.z_stat:.2f}, {format_p(mk_summary.p_value)}, "
             f"τ de Kendall = {mk_summary.tau:.2f}). "
             f"Pendiente de Sen: {mk_summary.sen_slope:+.1f} casos/año "
             f"(n = {mk_summary.n_obs} años; robusta a outliers, a diferencia de la "
@@ -1273,7 +1341,7 @@ def render_site_analysis_chart(
             f"**🏛️ Quiebre por evento en {arb_dept} ({site_val}): "
             f"año {arb_summary.break_year}**{lag_txt} — el cambio de tendencia es "
             f"{sig_txt} (test de Chow: F = {arb_summary.f_stat:.2f}, "
-            f"p = {arb_summary.p_value:.4f}). "
+            f"{format_p(arb_summary.p_value)}). "
             f"Pendiente antes: {arb_summary.slope_before:+.1f} casos/año · "
             f"pendiente después: {arb_summary.slope_after:+.1f} casos/año "
             f"(n antes = {arb_summary.n_before}, n después = {arb_summary.n_after})."
@@ -2034,7 +2102,7 @@ with tab_budget:
         _bk5.metric(
             "Tendencia Devengado (Mann-Kendall)",
             _mk_bud_kpi.trend if _mk_bud_kpi else "s/d",
-            f"p={_mk_bud_kpi.p_value:.3f}" if _mk_bud_kpi else "",
+            f"{format_p(_mk_bud_kpi.p_value)}" if _mk_bud_kpi else "",
         )
 
         st.divider()
@@ -2147,7 +2215,7 @@ with tab_budget:
             _bt1, _bt2, _bt3 = st.columns(3)
             _bt1.metric("Tendencia (Mann-Kendall)", _mk_bud.trend if _mk_bud else "s/d")
             _bt2.metric(
-                "p-valor", f"{_mk_bud.p_value:.4f}" if _mk_bud else "s/d",
+                "p-valor", format_p_value(_mk_bud.p_value) if _mk_bud else "s/d",
                 significance_label(_mk_bud.p_value) if _mk_bud else "",
             )
             _bt3.metric("Pendiente de Sen (S//año)", f"{_mk_bud.sen_slope:,.0f}" if _mk_bud else "s/d")
@@ -2179,7 +2247,7 @@ with tab_budget:
                     _ab1, _ab2, _ab3 = st.columns(3)
                     _ab1.metric("Año de quiebre detectado", f"{_auto_bud.year}")
                     _ab2.metric(
-                        "p-valor (test de Chow)", f"{_auto_bud.p_value:.4f}",
+                        "p-valor (test de Chow)", format_p_value(_auto_bud.p_value),
                         significance_label(_auto_bud.p_value),
                     )
                     _ab3.metric(
@@ -2347,7 +2415,7 @@ with tab_explore_sec:
             _k6.metric(
                 "Tendencia (Mann-Kendall)",
                 _mk_r.trend if _mk_r else "s/d",
-                f"p={_mk_r.p_value:.3f}" if _mk_r else "",
+                f"{format_p(_mk_r.p_value)}" if _mk_r else "",
             )
             return _mk_r
 
@@ -2434,7 +2502,7 @@ with tab_explore_sec:
                     if _mkres:
                         st.caption(
                             f"Mann-Kendall **{_mkcol}**: tendencia **{_mkres.trend}** "
-                            f"(p={_mkres.p_value:.4f}, método: {_mkres.method}). "
+                            f"({format_p(_mkres.p_value)}, método: {_mkres.method}). "
                             f"Pendiente de Sen: **{_mkres.sen_slope:,.4f}** u/año."
                         )
             else:
@@ -2443,7 +2511,7 @@ with tab_explore_sec:
                 if _mk_sec:
                     st.caption(
                         f"Mann-Kendall ({_kpi_lbl}): tendencia **{_mk_sec.trend}** "
-                        f"(p={_mk_sec.p_value:.4f}, método: {_mk_sec.method}). "
+                        f"({format_p(_mk_sec.p_value)}, método: {_mk_sec.method}). "
                         f"Pendiente de Sen: **{_mk_sec.sen_slope:,.4f}** u/año."
                     )
 
@@ -2524,7 +2592,7 @@ with tab_explore_sec:
                 _mk_t = mann_kendall_trend(_ts.index.to_numpy(), _ts.to_numpy())
                 _t1, _t2, _t3 = st.columns(3)
                 _t1.metric("Tendencia (Mann-Kendall)", _mk_t.trend if _mk_t else "s/d")
-                _t2.metric("p-valor", f"{_mk_t.p_value:.4f}" if _mk_t else "s/d", significance_label(_mk_t.p_value) if _mk_t else "")
+                _t2.metric("p-valor", format_p_value(_mk_t.p_value) if _mk_t else "s/d", significance_label(_mk_t.p_value) if _mk_t else "")
                 _t3.metric("Pendiente de Sen (u/año)", f"{_mk_t.sen_slope:,.4f}" if _mk_t else "s/d")
 
                 _trend_lin = linear_trend(_ts.index.to_numpy(), _ts.to_numpy())
@@ -2537,7 +2605,7 @@ with tab_explore_sec:
                 if _mk_t:
                     sig_word = significance_label(_mk_t.p_value)
                     st.caption(
-                        f"Tendencia **{_mk_t.trend}** (p={_mk_t.p_value:.4f}, método: {_mk_t.method}). "
+                        f"Tendencia **{_mk_t.trend}** ({format_p(_mk_t.p_value)}, método: {_mk_t.method}). "
                         f"Pendiente de Sen: **{_mk_t.sen_slope:,.4f}** unidades/año — {sig_word.lower()}."
                     )
 
@@ -2560,7 +2628,7 @@ with tab_explore_sec:
             else:
                 _ac1, _ac2, _ac3 = st.columns(3)
                 _ac1.metric("Año de quiebre detectado", f"{_auto_sec.year}")
-                _ac2.metric("p-valor (test de Chow)", f"{_auto_sec.p_value:.4f}", significance_label(_auto_sec.p_value))
+                _ac2.metric("p-valor (test de Chow)", format_p_value(_auto_sec.p_value), significance_label(_auto_sec.p_value))
                 _ac3.metric("Pendiente antes → después", f"{_auto_sec.slope_before:,.4f} → {_auto_sec.slope_after:,.4f}")
                 _fig_ab = go.Figure()
                 _fig_ab.add_trace(go.Scatter(x=_bp_series.index, y=_bp_series.values, mode="markers", name="Observado", marker=dict(color=PRIMARY_COLOR, size=6)))
@@ -2688,9 +2756,9 @@ with tab_cross:
                 _r_spear, _p_spear = spearmanr(_p_v, _s_v)
                 _cc1, _cc2, _cc3, _cc4 = st.columns(4)
                 _cc1.metric("Pearson r", f"{_r_pear:.4f}")
-                _cc2.metric("p-valor (Pearson)", f"{_p_pear:.4f}", significance_label(_p_pear))
+                _cc2.metric("p-valor (Pearson)", format_p_value(_p_pear), significance_label(_p_pear))
                 _cc3.metric("Spearman ρ", f"{_r_spear:.4f}")
-                _cc4.metric("p-valor (Spearman)", f"{_p_spear:.4f}", significance_label(_p_spear))
+                _cc4.metric("p-valor (Spearman)", format_p_value(_p_spear), significance_label(_p_spear))
 
                 _fig_sc = go.Figure()
                 _fig_sc.add_trace(go.Scatter(
@@ -2717,8 +2785,8 @@ with tab_cross:
                     else "sin correlación lineal apreciable"
                 )
                 st.caption(
-                    f"Las dos series muestran **{interp_r}** (Pearson r={_r_pear:.3f}, p={_p_pear:.4f}; "
-                    f"Spearman ρ={_r_spear:.3f}, p={_p_spear:.4f}). El scatter está coloreado "
+                    f"Las dos series muestran **{interp_r}** (Pearson r={_r_pear:.3f}, {format_p(_p_pear)}; "
+                    f"Spearman ρ={_r_spear:.3f}, {format_p(_p_spear)}). El scatter está coloreado "
                     "cronológicamente — el patrón de dispersión en la dirección del tiempo puede "
                     "revelar si la asociación cambió en distintos subperíodos. Correlación no implica causalidad."
                 )

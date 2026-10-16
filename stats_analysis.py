@@ -23,6 +23,11 @@ dashboard:
                              la apertura de un hospital oncológico),
                              con opción de excluir años de
                              "implementación" tras el evento
+  - log_linear_apc()      -> cambio porcentual anual (APC) por
+                             regresión log-lineal, estilo Joinpoint
+                             (un solo tramo), con IC95% y p-valor
+  - format_p()            -> formato estándar de p-valores (3
+                             decimales; p < 0.001 cuando corresponde)
   - smooth_series()       -> suavizado LOWESS de la serie temporal,
                              para ver la tendencia sin el ruido
                              año a año
@@ -144,6 +149,16 @@ class MannKendallResult:
     y_sen: np.ndarray     # línea de la pendiente de Sen, para graficar
     n_obs: int
     method: str           # qué variante del test se usó realmente
+
+
+@dataclass
+class APCResult:
+    apc: float            # cambio porcentual anual, en % (p. ej. 2.3)
+    ci_low: float         # límite inferior IC, en %
+    ci_high: float        # límite superior IC, en %
+    p_value: float        # H0: APC = 0
+    n_obs: int
+    ci_level: float
 
 
 @dataclass
@@ -543,3 +558,59 @@ def significance_label(p_value: float, alpha: float = 0.05) -> str:
     if p_value < 2 * alpha:
         return "Marginal"
     return "No significativo"
+
+
+def log_linear_apc(
+    years: np.ndarray, values: np.ndarray, min_obs: int = 3, ci: float = 0.95
+) -> APCResult | None:
+    """Cambio porcentual anual (APC, *Annual Percent Change*) estimado
+    con la regresión log-lineal ln(y) = a + b·año, como hace Joinpoint
+    (NCI) para un solo tramo: APC = (e^b − 1) × 100.
+
+    A diferencia del CAGR, usa todos los años observados (no solo los
+    extremos). El IC y el p-valor se obtienen de la distribución t de
+    la pendiente b, transformada a la escala de APC. Al igual que la
+    configuración por defecto de Joinpoint, asume errores
+    independientes; con autocorrelación fuerte el IC puede ser algo
+    estrecho, por eso se reporta junto al Mann-Kendall corregido.
+
+    Solo usa años con valores > 0 (el logaritmo no está definido en 0).
+    Devuelve None si quedan menos de `min_obs` observaciones válidas.
+    """
+    x = np.asarray(years, dtype=float)
+    y = np.asarray(values, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y) & (y > 0)
+    x, y = x[mask], y[mask]
+    if len(x) < min_obs or np.ptp(x) == 0:
+        return None
+    res = stats.linregress(x, np.log(y))
+    df = len(x) - 2
+    t_crit = stats.t.ppf(1 - (1 - ci) / 2, df)
+    b, se = res.slope, res.stderr
+    return APCResult(
+        apc=float(np.expm1(b) * 100),
+        ci_low=float(np.expm1(b - t_crit * se) * 100),
+        ci_high=float(np.expm1(b + t_crit * se) * 100),
+        p_value=float(res.pvalue),
+        n_obs=len(x),
+        ci_level=ci,
+    )
+
+
+def format_p_value(p_value: float) -> str:
+    """Solo el número del p-valor: 3 decimales, o "< 0.001" cuando el
+    valor redondeado sería 0.000 (convención de reporte científico)."""
+    if p_value is None or not np.isfinite(p_value):
+        return "s/d"
+    if p_value < 0.001:
+        return "< 0.001"
+    return f"{p_value:.3f}"
+
+
+def format_p(p_value: float) -> str:
+    """p-valor con prefijo, listo para insertar en texto:
+    "p = 0.012" o "p < 0.001"."""
+    v = format_p_value(p_value)
+    if v == "s/d":
+        return "p = s/d"
+    return f"p {v}" if v.startswith("<") else f"p = {v}"
