@@ -27,6 +27,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from budget_processing import MONTO_COLS, MONTO_LABELS, load_budget_data
+from qa_engine import QAContext
+from qa_ui import render_qa_result_main, render_qa_section
 from data_processing import (
     ALL_SITES_LABEL,
     PERU_LABEL,
@@ -333,6 +335,9 @@ def top3_localizaciones(dept: str, year: int) -> str:
 
 with st.sidebar:
     st.header("⚙️ Panel de control")
+    # Contenedor reservado arriba del panel; se llena al final de la barra
+    # lateral, cuando ya se conocen los filtros que puede heredar.
+    _qa_box = st.container()
 
     with st.expander("📥 Incorporar datos recientes", expanded=False):
         st.caption(
@@ -787,11 +792,34 @@ with st.sidebar:
                     f"Color · {d}", value=DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)]
                 )
 
+    # --- 💬 Pregunta a los datos (se dibuja en el contenedor superior) ---
+    @st.cache_data(show_spinner=False)
+    def _qa_budget() -> dict | None:
+        try:
+            return load_budget_data()
+        except Exception:  # noqa: BLE001
+            return None
+
+    _qa_bud = _qa_budget()
+    _qa_kwargs = dict(
+        budget_anual=st.session_state.get("budget_anual", _qa_bud["anual"] if _qa_bud else None),
+        budget_detalle=st.session_state.get("budget_detalle", _qa_bud["detalle"] if _qa_bud else None),
+    )
+    with _qa_box:
+        render_qa_section(
+            df,
+            QAContext(list(depts_selected), site, tuple(year_range), list(peru_exclude), **_qa_kwargs),
+            QAContext([PERU_LABEL], ALL_SITES_LABEL, (year_min, year_max), [], **_qa_kwargs),
+        )
+
     st.divider()
     st.caption(
         "Fuente: Instituto Nacional de Enfermedades Neoplásicas (INEN), Perú. "
         "Panel construido con Streamlit + Plotly."
     )
+
+# Resultado de "💬 Pregunta a los datos" en el panel principal (si hay uno)
+render_qa_result_main()
 
 # ---------------------------------------------------------------------------
 # Filtrado
