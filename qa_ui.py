@@ -45,6 +45,9 @@ _QA_CSS = """
     padding: 0.55rem 0.9rem;
 }
 .st-key-qa_answer_box p { font-size: 0.92rem; margin-bottom: 0.2rem; color: #1f2d5c; }
+.st-key-qa_close_box { display: flex; justify-content: flex-end; }
+.st-key-qa_close_box button { min-height: 0; padding: 0.15rem 0.55rem; }
+.st-key-qa_close_box button p { font-size: 1.05rem; line-height: 1; }
 .qa-main-title { font-size: 1.15rem; font-weight: 700; color: #1f2d5c; margin: 0.15rem 0 0 0; }
 .qa-separator { border: none; border-top: 2px solid #d9dbe6; margin: 1.1rem 0 1.2rem 0; }
 </style>
@@ -219,13 +222,15 @@ def render_qa_result_main() -> None:
     ans: QAAnswer = res["ans"]
 
     with st.container(border=True):
-        h1, h2 = st.columns([6, 1], vertical_alignment="center")
+        h1, h2 = st.columns([20, 1], vertical_alignment="center")
         h1.markdown(f'<p class="qa-main-title">💬 {res["q"]}</p>', unsafe_allow_html=True)
-        h2.button("✕ Cerrar", key="qa_close", on_click=_close_result, use_container_width=True)
+        with h2.container(key="qa_close_box"):
+            st.button("✕", key="qa_close", on_click=_close_result, help="Cerrar")
 
         mode = f"✨ Modo IA ({res['model']})" if res.get("ai") else "🌙 Modo por reglas"
         filt = "con filtros del panel" if res.get("filters") else "sin filtros del panel"
-        meta = " · ".join(x for x in [mode, filt, ans.interpretation] if x)
+        tipo = _INTENT_LABELS.get(ans.intent, ans.intent) if ans.intent else ""
+        meta = " · ".join(x for x in [mode, filt, tipo, ans.interpretation] if x)
         st.caption(meta)
 
         with st.container(key="qa_answer_box"):
@@ -259,15 +264,5 @@ def render_qa_result_main() -> None:
         )
         if ans.table is not None and ans.ok and ans.intent.startswith("ranking"):
             st.caption(f"ℹ️ Se muestran {len(ans.table)} categorías (mayor número de casos primero).")
-
-        with st.expander("¿Cómo se interpretó la pregunta?", expanded=False):
-            st.markdown(
-                f"- **Pregunta:** {res['q']}\n"
-                f"- **Tipo de consulta:** {_INTENT_LABELS.get(ans.intent, ans.intent or 'sin clasificar')}\n"
-                f"- **Parámetros:** {ans.interpretation or 'no aplica'}\n"
-                f"- **Filtros del panel:** {'aplicados a lo que la pregunta no especifica' if res.get('filters') else 'no aplicados (Perú, todas las localizaciones, todo el periodo)'}\n"
-                f"- **Motor:** {mode}"
-            )
-            st.caption("Lo que menciona la pregunta (localización, departamento, años) siempre tiene prioridad sobre el panel.")
 
     st.markdown('<hr class="qa-separator">', unsafe_allow_html=True)
