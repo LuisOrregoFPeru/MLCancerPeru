@@ -1,4 +1,4 @@
-streamlit>=1.36
+streamlit>=1.42
 pandas>=2.0
 plotly>=5.20
 openpyxl>=3.1
@@ -7,3 +7,4 @@ pymannkendall>=1.4.3
 statsmodels>=0.14
 matplotlib>=3.8
 imageio>=2.34
+anthropic>=0.40  # opcional: modo IA de "Pregunta a los datos"
